@@ -30,7 +30,11 @@ compute_svs[Compute SVs\nusing Rimsky et al.]
 eval_gpt2[Eval base GPT-2 on the dataset]
 run_saes[Actually download the SAEs\nand make them work]
 eval_svs[Eval SVs, compare with base GPT-2\nfor plot & eval inspo see Rimsky et al.]
-eval_saes[Eval SAEs on the dataset,\ncompare with base GPT-2]
+eval_saes[
+    Eval SAEs on the dataset.
+    Check that there is a meaningful difference
+    in which features fire in the POS v. NEG tasks.
+]
 
 %% Questions
 q1[
@@ -54,13 +58,13 @@ If we fail to reproduce Rimsky — i.e. if our steering vectors don't steer the 
 
 The SAEs should perform very similarly to base GPT-2 on our datasets. If they don't, there's something wrong with them (or their interaction with the dataset).
 
+If all features fire similarly on the positive and negative examples, we're doing something wrong — or maybe the features are too low-level to capture any high-level ideas like "refusal".
 
 ## Research questions
 
 **Q1:  Are SVs aligned with features?** I'd expect a steering vector to be an average of multiple related features that all capture the idea of the steering vector but in different contexts / with slightly different flavours.
 
 **Q2: Do we see different groups of contrastive feature pairs?** This is related to Q1. Say we run SAEs on the contrastive dataset we prepared — can we further "split" the dataset to smaller semantic chunks in which different features fire? For example, in a refusal dataset, can we identify something like "refusal because dangerous" and "refusal because lack of understanding" groups of tasks in which completely different features do the "refusal" part of the job?
-
 
 Other research questions worth considering:
 - Generally inspect how features behave on the contrastive dataset. Are there any "opposite" features?
