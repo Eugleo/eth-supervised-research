@@ -8,20 +8,21 @@ Critical steps that need to work for the project to make sense are highlighted i
 flowchart TD
 
 %% Node connections
-verify_saes --> dataset
-dataset --> compute_svs
-dataset --> eval_gpt2
-compute_svs --> eval_svs
-eval_gpt2 --> eval_svs
+subgraph For the mid-may Presentation
+    verify_saes --> dataset
+    dataset --> compute_svs
+    dataset --> eval_gpt2
+    compute_svs --> eval_svs
+    eval_gpt2 --> eval_svs
+
+    verify_saes --> run_saes
+    dataset --> eval_saes
+    run_saes --> eval_saes
+end
 
 eval_svs --> q1
-
-verify_saes --> run_saes
-dataset --> eval_saes
-run_saes --> eval_saes
 eval_saes --> q1
 eval_saes --> q2
-
 
 %% Node titles
 verify_saes[Verify that GPT-2 small SAEs are publicly available]
