@@ -15,5 +15,6 @@ Actions:
 - [X] Create repo
 - [X] Write proposal draft
     - EDIT: Done, [link](./proposal/proposal.pdf)
-- [ ] Send proposal draft to Elliott before Sunday
-- [ ] Think about goals, failure modes, and in turn, what we need to test first to quickly fail/validate the idea
+- [X] Send proposal draft to Elliott before Sunday
+- [X] Think about goals, failure modes, and in turn, what we need to test first to quickly fail/validate the idea
+    - EDIT: Done, see README
