@@ -20,9 +20,10 @@ def main(
     layers: Annotated[List[int], Option()] = list(range(12)),
     model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
+    device: Annotated[str, Option()] = "cpu",
 ):
     utils.set_seed(seed)
-    model = LanguageModel(model_id)
+    model = LanguageModel(model_id, device_map=device)
 
     for dataset in datasets:
         print(f"Generating for {dataset}...")

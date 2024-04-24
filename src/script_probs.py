@@ -12,6 +12,7 @@ from rich.progress import Progress
 from sv.datasets import Dataset, EvalDataset
 from sv.vectors import SteeringVector
 from typer import Argument, Option
+from torch.utils.data import DataLoader
 from typing_extensions import Annotated
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
@@ -56,9 +57,10 @@ def probs_for_dataset(
 ):
     if 0 not in coeffs:
         raise ValueError("0 should be in the list of coefficients")
-
-    loader = t.utils.data.DataLoader(dataset, batch_size=1)
+    batch_size = 1 if model.device == "cpu" else 32
+    loader = DataLoader(dataset, batch_size=batch_size)
     results = []
+
 
     with Progress() as progress:
         task_n = len(loader) * (1 + len(steering_vectors) * (len(coeffs) - 1))
@@ -83,18 +85,20 @@ def main(
     coeffs: Annotated[List[float], Option()] = [],
     model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
+    device: Annotated[str, Option()] = "cpu",
 ):
     if not coeffs:
-        coeffs = [-1.5, -1, -0.5, 0, 0.5, 1, 1.5]
+        coeffs = [-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5]
 
     utils.set_seed(seed)
-    model = LanguageModel(model_id)
+    model = LanguageModel(model_id, device_map=device)
 
+    print(f"Processing {len(datasets)} datasets and {len(coeffs)} coefficients")
     for dataset in datasets:
         print(f"Processing dataset {dataset}...")
         dataset_dir = Path(data_dir) / dataset
         vec_dir = dataset_dir / "vectors"
-        vectors = [SteeringVector.load(path) for path in vec_dir.iterdir()]
+        vectors = [SteeringVector.load(path, device) for path in vec_dir.iterdir()]
         for set in ["test", "generate"]:
             if only_test and set != "test":
                 continue
