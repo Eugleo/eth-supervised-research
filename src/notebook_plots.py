@@ -32,7 +32,7 @@ def distributions(data: pl.DataFrame):
         schema_overrides={"index": pl.UInt32},
     )
     baseline = baseline.join(coeff_df, on="index", how="left").drop("index")
-    data = data.filter(c("intervention_layer").is_in([1, 5, 9]))
+    data = data.filter(c("intervention_layer").is_not_null())
 
     return px.histogram(
         pl.concat([baseline, data])
