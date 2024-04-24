@@ -91,7 +91,7 @@ def main(
         coeffs = [-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5]
 
     utils.set_seed(seed)
-    model = LanguageModel(model_id, device_map=device)
+    model = LanguageModel(model_id, device_map=device, dispatch=True)
 
     print(f"Processing {len(datasets)} datasets and {len(coeffs)} coefficients")
     for dataset in datasets:

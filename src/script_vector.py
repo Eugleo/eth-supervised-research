@@ -23,7 +23,7 @@ def main(
     device: Annotated[str, Option()] = "cpu",
 ):
     utils.set_seed(seed)
-    model = LanguageModel(model_id, device_map=device)
+    model = LanguageModel(model_id, device_map=device, dispatch=True)
 
     for dataset in datasets:
         print(f"Generating for {dataset}...")
