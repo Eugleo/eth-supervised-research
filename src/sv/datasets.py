@@ -214,6 +214,34 @@ class Dataset:
         return dataset
 
     @staticmethod
+    def from_randomized_original(
+        path: Path, format: Format
+    ) -> "Dataset":
+        with open(path) as f:
+            rimsky_items = json.load(f)
+
+        questions, pos, neg = [], [], []
+        for item in [Item.from_rimsky_item(i) for i in rimsky_items]:
+            questions.append(item.question)
+            pos.append(item.pos)
+            neg.append(item.neg)
+        random.shuffle(questions)
+        random.shuffle(pos)
+        random.shuffle(neg)
+
+        items: List[Item] = [
+            Item(question, pos, neg)
+            for question, pos, neg in zip(
+                questions,
+                pos,
+                neg
+            )
+        ]
+        dataset = Dataset(items, format=format)
+
+        return dataset
+
+    @staticmethod
     def from_random_mix(
         paths: List[Path], generate_size: int, test_size: int, format: Format
     ) -> tuple["Dataset", "Dataset"]:

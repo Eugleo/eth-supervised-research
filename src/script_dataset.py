@@ -39,6 +39,32 @@ def randomize(
 
 
 @app.command()
+def load_randomize(
+    datasets: Annotated[List[str], Argument()],
+    format: Annotated[Format, Option()] = Format.repeated,
+    data_dir: Annotated[str, Option()] = "data",
+    seed: Annotated[int, Option()] = 42,
+):
+    utils.set_seed(seed)
+
+    with Progress() as progress:
+        task_n = len(datasets) * 2
+        task_loading = progress.add_task("Loading and writing...", total=task_n)
+        for name in datasets:
+            source_dir = Path(data_dir) / name
+            dataset_name = (
+                f"{name}_{format.name}" if format != Format.repeated else name
+            )
+            dataset_name += "_random"
+            save_dir = Path(data_dir) / dataset_name
+            save_dir.mkdir(parents=True, exist_ok=True)
+            for set in ["generate", "test"]:
+                orig_data = source_dir / "original" / f"{set}.json"
+                dataset = Dataset.from_randomized_original(orig_data, format=format)
+                dataset.save(save_dir / f"{set}.json")
+                progress.update(task_loading, advance=1)
+
+@app.command()
 def load(
     datasets: Annotated[List[str], Argument()],
     format: Annotated[Format, Option()] = Format.repeated,
