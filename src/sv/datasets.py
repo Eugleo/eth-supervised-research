@@ -49,6 +49,7 @@ class ContrastiveDataset(Dataset):
             raise ValueError(f"Invalid question: {item['question']}")
 
         question, a, b = [text.strip() for text in match.groups()]
+        a, b = f" A) {a}", f" B) {b}"
         pos, neg = (a, b) if item["answer_matching_behavior"] == "(A)" else (b, a)
 
         return question, pos, neg
@@ -57,9 +58,9 @@ class ContrastiveDataset(Dataset):
     def _build_prompt(question: str, first: str, second: str):
         return "\n\n".join(
             [
-                f"Q: {question}\nA: {first}",
-                f"Q: {question}\nA: {second}",
-                f"Q: {question}\nA:",  # no need for space
+                f"Q: {question}\nA:{first}",
+                f"Q: {question}\nA:{second}",
+                f"Q: {question}\nA:",
             ]
         )
 
@@ -73,7 +74,7 @@ class ContrastiveDataset(Dataset):
         for id, (question, pos, neg) in enumerate(questions_with_answers):
             pair = {"id": id}
             for first, second, label in [(pos, neg, "neg"), (neg, pos, "pos")]:
-                answer_token = tokenizer(f" {second}").input_ids[0]
+                answer_token = tokenizer(second).input_ids[0]
                 if not answer_most_recent:
                     first, second = second, first
                 prompt = ContrastiveDataset._build_prompt(question, first, second)
