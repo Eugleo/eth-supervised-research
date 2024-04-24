@@ -64,11 +64,14 @@ fig.show()
 # %%
 def delta_per_layer(data: pl.DataFrame):
     baselines = data.filter(c("intervention_layer").is_null()).select(
-        "id", "most_recent", "measured_token", c("measured_prob").alias("prob_baseline")
+        "id",
+        "answer_is_first_option",
+        "measured_token",
+        c("measured_prob").alias("prob_baseline"),
     )
 
     deltas = (
-        data.join(baselines, on=["id", "most_recent", "measured_token"])
+        data.join(baselines, on=["id", "answer_is_first_option", "measured_token"])
         .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
         .group_by("intervention_layer", "intervention_coeff", "measured_token")
         .agg(c("delta").median().alias("delta_median"))
@@ -99,17 +102,17 @@ fig.show()
 
 # %%
 def delta_per_coeff(data: pl.DataFrame, layer: int):
-    max_deltas = (
+    probs = (
         data.filter(
             (c("intervention_layer") == layer) | c("intervention_layer").is_null()
         )
-        .group_by("measured_token", "intervention_coeff", "most_recent")
+        .group_by("measured_token", "intervention_coeff", "answer_is_first_option")
         .agg(c("measured_prob").median().alias("measured_prob_median"))
-        .sort("measured_token", "intervention_coeff", "most_recent")
+        .sort("measured_token", "intervention_coeff", "answer_is_first_option")
     )
 
     return px.line(
-        max_deltas.to_pandas(),
+        probs.to_pandas(),
         x="intervention_coeff",
         y="measured_prob_median",
         color="measured_token",
@@ -118,12 +121,11 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
             "measured_prob_median": "Median of P(m. tok.)",
             "intervention_coeff": "Steering vector multiplier",
         },
-        facet_row="most_recent",
+        facet_row="answer_is_first_option",
+        title=f"Effect of steering multiplier in layer {layer}",
     )
 
 
-fig = delta_per_coeff(data, layer=5)
+fig = delta_per_coeff(data, layer=7)
 fig.write_image(plot_dir / "delta_per_coeff.pdf")
 fig.show()
-
-# %%

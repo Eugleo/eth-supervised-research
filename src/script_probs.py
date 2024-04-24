@@ -18,9 +18,11 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 
 
 def probs_for_batch(
-    model, batch, most_recent, coeff: float = 0, sv: Optional[SteeringVector] = None
+    model, batch, coeff: float = 0, sv: Optional[SteeringVector] = None
 ):
-    prompts = batch[most_recent]["prompt"]
+    # Here we can ignore "neg" since in the dataset there are
+    # both (pos, neg) and (neg, pos) variants
+    prompts = batch["pos"]["prompt"]
     neg_tokens, pos_tokens = batch["neg"]["answer_token"], batch["pos"]["answer_token"]
 
     with t.no_grad(), model.trace(scan=False, validate=False) as runner:
@@ -44,7 +46,11 @@ def probs_for_batch(
     return [
         {
             "id": id,
-            "most_recent": most_recent,
+            # If answer_first is True, then the first option is the positive one
+            # Since we are only looking at the prompts from the "pos" POV
+            "answer_was_first_option": answer_first
+            if answer == "pos"
+            else not answer_first,
             "measured_token": answer,
             "measured_prob": prob,
             "argmax_token": argmax_token,
@@ -52,7 +58,9 @@ def probs_for_batch(
             "intervention_coeff": coeff,
         }
         for answer, probs in [("neg", neg_probs), ("pos", pos_probs)]
-        for id, argmax_token, prob in zip(batch["id"], argmax_tokens, probs)
+        for id, answer_first, argmax_token, prob in zip(
+            batch["id"], batch["answer_is_first_option"], argmax_tokens, probs
+        )
     ]
 
 
@@ -74,16 +82,13 @@ def probs_for_dataset(
         task_computing = progress.add_task("Computing...", total=task_n)
 
         for batch in loader:
-            for most_recent in ["neg", "pos"]:
-                invoke = partial(
-                    probs_for_batch, model=model, batch=batch, most_recent=most_recent
-                )
-                progress.update(task_computing, advance=1)
-                results += invoke()
-                for sv in steering_vectors:
-                    for coeff in (c for c in coeffs if c != 0):
-                        progress.update(task_computing, advance=1)
-                        results += invoke(coeff=coeff, sv=sv)
+            invoke = partial(probs_for_batch, model=model, batch=batch)
+            progress.update(task_computing, advance=1)
+            results += invoke()
+            for sv in steering_vectors:
+                for coeff in (c for c in coeffs if c != 0):
+                    progress.update(task_computing, advance=1)
+                    results += invoke(coeff=coeff, sv=sv)
 
     return pl.DataFrame(results)
 

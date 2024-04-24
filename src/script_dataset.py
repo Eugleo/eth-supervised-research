@@ -31,11 +31,7 @@ def randomize(
     ]
 
     generate_dataset, test_dataset = ContrastiveDataset.from_random_mix(
-        data_paths,
-        model.tokenizer,
-        generate_size=generate_size,
-        test_size=test_size,
-        answer_most_recent=True,
+        data_paths, model.tokenizer, generate_size=generate_size, test_size=test_size
     )
 
     out_dir = Path(dataset_dir) / name
@@ -47,7 +43,7 @@ def randomize(
 @app.command()
 def load(
     datasets: Annotated[List[str], Argument()],
-    dataset_dir: Annotated[str, Option()] = "data",
+    data_dir: Annotated[str, Option()] = "data",
     model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
 ):
@@ -58,12 +54,11 @@ def load(
         task_n = len(datasets) * 2
         task_loading = progress.add_task("Loading and writing...", total=task_n)
         for name in datasets:
+            dataset_dir = Path(data_dir) / name
             for set in ["generate", "test"]:
-                data_path = Path(dataset_dir) / name / "original" / f"{set}.json"
-                dataset = ContrastiveDataset.from_rimsky(
-                    data_path, model.tokenizer, answer_most_recent=True
-                )
-                dataset.save(Path(dataset_dir) / name / f"{set}.json")
+                orig_data = dataset_dir / "original" / f"{set}.json"
+                dataset = ContrastiveDataset.from_rimsky(orig_data, model.tokenizer)
+                dataset.save(dataset_dir / f"{set}.json")
                 progress.update(task_loading, advance=1)
 
 
