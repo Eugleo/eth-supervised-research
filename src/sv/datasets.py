@@ -49,13 +49,23 @@ class ContrastiveDataset(Dataset):
             raise ValueError(f"Invalid question: {item['question']}")
 
         question, a, b = [text.strip() for text in match.groups()]
-        a, b = f" A) {a}", f" B) {b}"
+        a, b = f" ^ {a}", f" $ {b}"
         pos, neg = (a, b) if item["answer_matching_behavior"] == "(A)" else (b, a)
 
         return question, pos, neg
 
     @staticmethod
-    def _build_prompt(question: str, first: str, second: str):
+    def _rimsky_prompt(question: str, first: str, second: str):
+        return "\n\n".join(
+            [
+                f"Question: {question}",
+                f"Choices:\nA:{first}\nA:{second}",
+                "Answer:\nA:",
+            ]
+        )
+
+    @staticmethod
+    def _prompt(question: str, first: str, second: str):
         return "\n\n".join(
             [
                 f"Q: {question}\nA:{first}",
@@ -69,6 +79,7 @@ class ContrastiveDataset(Dataset):
         questions_with_answers: Iterable[tuple[str, str, str]],
         answer_most_recent: bool,
         tokenizer: PreTrainedTokenizer,
+        rimsky_format=False,
     ):
         items = []
         for id, (question, pos, neg) in enumerate(questions_with_answers):
@@ -77,7 +88,10 @@ class ContrastiveDataset(Dataset):
                 answer_token = tokenizer(second).input_ids[0]
                 if not answer_most_recent:
                     first, second = second, first
-                prompt = ContrastiveDataset._build_prompt(question, first, second)
+                if rimsky_format:
+                    prompt = ContrastiveDataset._rimsky_prompt(question, second, first)
+                else:
+                    prompt = ContrastiveDataset._prompt(question, first, second)
                 pair[label] = {  # type: ignore
                     "prompt": prompt,
                     "answer_token": answer_token,
@@ -88,7 +102,10 @@ class ContrastiveDataset(Dataset):
 
     @staticmethod
     def from_rimsky(
-        path: Path, tokenizer: PreTrainedTokenizer, answer_most_recent=True
+        path: Path,
+        tokenizer: PreTrainedTokenizer,
+        answer_most_recent=True,
+        rimsky_format=False,
     ) -> "ContrastiveDataset":
         with open(path) as f:
             data = json.load(f)
@@ -97,7 +114,7 @@ class ContrastiveDataset(Dataset):
             ContrastiveDataset._parse_rimsky_item(i) for i in data
         )
         items = ContrastiveDataset._build_dataset(
-            questions_with_answers, answer_most_recent, tokenizer
+            questions_with_answers, answer_most_recent, tokenizer, rimsky_format
         )
         dataset = ContrastiveDataset(items)
 
