@@ -132,14 +132,18 @@ class Dataset:
         pairs: List[ContrastivePair] = []
         for item in self._items:
             for first, second in [("pos", "neg"), ("neg", "pos")]:
-                _, pos_token_str, _, neg_token_str = item.get_tokens(
+                _, pos_token_str, _, _ = item.get_tokens(
                     (first, second), self._format, tokenizer
                 )
-                prompt = self.make_prompt(*item.ordered(first, second))
+                pos_prompt = self.make_prompt(*item.ordered(first, second))
+                _, _, _, neg_token_str = item.get_tokens(
+                    (second, first), self._format, tokenizer
+                )
+                neg_prompt = self.make_prompt(*item.ordered(second, first))
                 pairs.append(
                     {
-                        "pos": prompt + pos_token_str,
-                        "neg": prompt + neg_token_str,
+                        "pos": pos_prompt + pos_token_str,
+                        "neg": neg_prompt + neg_token_str,
                     }
                 )
 
@@ -183,9 +187,9 @@ class Dataset:
     def _combined_prompt(question: str, first: str, second: str):
         return "\n\n".join(
             [
-                f"Q: {question}\nOption A: {first}",
-                f"Q: {question}\nOption B: {second}",
-                f"Q: {question}\nOption",
+                f"Q: {question}\nA: I choose option A: {first}",
+                f"Q: {question}\nA: I choose option B: {second}",
+                f"Q: {question}\nA: I choose option",
             ]
         )
 
