@@ -2,10 +2,9 @@ from pathlib import Path
 from typing import Annotated, List
 
 import typer
-from nnsight import LanguageModel
 from rich.progress import Progress
 from sv import utils
-from sv.datasets import ContrastiveDataset
+from sv.datasets import Dataset, Format
 from typer import Argument, Option
 
 app = typer.Typer()
@@ -16,13 +15,12 @@ def randomize(
     datasets: Annotated[List[str], Argument()],
     generate_size: Annotated[int, Option()],
     test_size: Annotated[int, Option()],
+    format: Annotated[Format, Option()] = Format.repeated,
     name: Annotated[str, Option()] = "random",
     dataset_dir: Annotated[str, Option()] = "data",
-    model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
 ):
     utils.set_seed(seed)
-    model = LanguageModel(model_id)
 
     data_paths = [
         Path(dataset_dir) / dataset / "original" / f"{set}.json"
@@ -30,8 +28,8 @@ def randomize(
         for set in ["generate", "test"]
     ]
 
-    generate_dataset, test_dataset = ContrastiveDataset.from_random_mix(
-        data_paths, model.tokenizer, generate_size=generate_size, test_size=test_size
+    generate_dataset, test_dataset = Dataset.from_random_mix(
+        data_paths, generate_size=generate_size, test_size=test_size, format=format
     )
 
     out_dir = Path(dataset_dir) / name
@@ -43,12 +41,11 @@ def randomize(
 @app.command()
 def load(
     datasets: Annotated[List[str], Argument()],
+    format: Annotated[Format, Option()] = Format.repeated,
     data_dir: Annotated[str, Option()] = "data",
-    model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
 ):
     utils.set_seed(seed)
-    model = LanguageModel(model_id)
 
     with Progress() as progress:
         task_n = len(datasets) * 2
@@ -57,7 +54,7 @@ def load(
             dataset_dir = Path(data_dir) / name
             for set in ["generate", "test"]:
                 orig_data = dataset_dir / "original" / f"{set}.json"
-                dataset = ContrastiveDataset.from_rimsky(orig_data, model.tokenizer)
+                dataset = Dataset.from_original(orig_data, format=format)
                 dataset.save(dataset_dir / f"{set}.json")
                 progress.update(task_loading, advance=1)
 

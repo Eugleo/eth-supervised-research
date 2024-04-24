@@ -6,7 +6,7 @@ from nnsight import LanguageModel
 from rich.progress import track
 from torch.utils.data import DataLoader
 
-from sv.datasets import ContrastiveDataset
+from sv.datasets import ContrastivePair, GenDataset
 
 
 @dataclass
@@ -24,17 +24,18 @@ class SteeringVector:
 
     @staticmethod
     def generate(
-        model: LanguageModel, dataset: ContrastiveDataset, layer: int
+        model: LanguageModel, dataset: GenDataset, layer: int
     ) -> "SteeringVector":
         loader = DataLoader(dataset, batch_size=1, shuffle=True)
         differences = t.zeros(model.transformer.config.n_embd)  # type: ignore
 
         for item in track(loader):
+            item: ContrastivePair
             with t.no_grad(), model.trace(scan=False, validate=False) as tracer:  # type: ignore
-                with tracer.invoke(item["pos"]["complete"], scan=False) as _:
+                with tracer.invoke(item["pos"], scan=False) as _:
                     h_pos = model.transformer.h[layer].output[0].t[-1]
 
-                with tracer.invoke(item["neg"]["complete"], scan=False) as _:
+                with tracer.invoke(item["neg"], scan=False) as _:
                     h_neg = model.transformer.h[layer].output[0].t[-1]
 
                 difference = (h_pos - h_neg).sum(0).save()

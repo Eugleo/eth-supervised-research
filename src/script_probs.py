@@ -9,7 +9,7 @@ import torch as t
 import typer
 from nnsight import LanguageModel
 from rich.progress import Progress
-from sv.datasets import ContrastiveDataset
+from sv.datasets import Dataset, EvalDataset
 from sv.vectors import SteeringVector
 from typer import Argument, Option
 from typing_extensions import Annotated
@@ -20,11 +20,11 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 def probs_for_batch(
     model, batch, coeff: float = 0, sv: Optional[SteeringVector] = None
 ):
-    # Here we can ignore "neg" since in the dataset there are
-    # both (pos, neg) and (neg, pos) variants
-    prompts = batch["pos"]["prompt"]
-    neg_tokens, pos_tokens = batch["neg"]["answer_token"], batch["pos"]["answer_token"]
-
+    prompts, neg_tokens, pos_tokens = (
+        batch["prompt"],
+        batch["neg_token"],
+        batch["pos_token"],
+    )
     with t.no_grad(), model.trace(scan=False, validate=False) as runner:
         with runner.invoke(prompts, scan=False) as _:
             if sv and coeff != 0:
@@ -32,42 +32,25 @@ def probs_for_batch(
             output = model.lm_head.output.t[-1].softmax(dim=-1)
             neg_probs = output[t.arange(len(prompts)), neg_tokens].tolist().save()
             pos_probs = output[t.arange(len(prompts)), pos_tokens].tolist().save()
-            output_tokens = output.argmax(dim=-1).tolist().save()
-
-    argmax_tokens = []
-    for neg, pos, output in zip(neg_tokens, pos_tokens, output_tokens):
-        if output == neg:
-            argmax_tokens.append("neg")
-        elif output == pos:
-            argmax_tokens.append("pos")
-        else:
-            argmax_tokens.append("other")
 
     return [
         {
-            "id": id,
-            # If answer_first is True, then the first option is the positive one
-            # Since we are only looking at the prompts from the "pos" POV
-            "answer_was_first_option": answer_first
-            if answer == "pos"
-            else not answer_first,
-            "measured_token": answer,
+            "q_num": q_num,
+            "ordering": ordering,
+            "measured_token": measured_token,
             "measured_prob": prob,
-            "argmax_token": argmax_token,
             "intervention_layer": sv.layer if sv else None,
             "intervention_coeff": coeff,
         }
-        for answer, probs in [("neg", neg_probs), ("pos", pos_probs)]
-        for id, answer_first, argmax_token, prob in zip(
-            batch["id"], batch["answer_is_first_option"], argmax_tokens, probs
-        )
+        for measured_token, probs in [("neg", neg_probs), ("pos", pos_probs)]
+        for q_num, ordering, prob in zip(batch["q_num"], batch["ordering"], probs)
     ]
 
 
 @t.inference_mode()
 def probs_for_dataset(
     model: LanguageModel,
-    dataset: ContrastiveDataset,
+    dataset: EvalDataset,
     steering_vectors: List[SteeringVector],
     coeffs: List[float],
 ):
@@ -78,7 +61,7 @@ def probs_for_dataset(
     results = []
 
     with Progress() as progress:
-        task_n = len(loader) * 2 * (1 + len(steering_vectors) * (len(coeffs) - 1))
+        task_n = len(loader) * (1 + len(steering_vectors) * (len(coeffs) - 1))
         task_computing = progress.add_task("Computing...", total=task_n)
 
         for batch in loader:
@@ -102,7 +85,7 @@ def main(
     seed: Annotated[int, Option()] = 42,
 ):
     if not coeffs:
-        coeffs = [-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5]
+        coeffs = [-1.5, -1, -0.5, 0, 0.5, 1, 1.5]
 
     utils.set_seed(seed)
     model = LanguageModel(model_id)
@@ -116,7 +99,9 @@ def main(
             if only_test and set != "test":
                 continue
 
-            data = ContrastiveDataset.load(dataset_dir / f"{set}.json")
+            data = Dataset.load(dataset_dir / f"{set}.json").for_evaluating(
+                tokenizer=model.tokenizer
+            )
             probs = probs_for_dataset(model, data, vectors, coeffs)
 
             probs_dir = dataset_dir / "probs"

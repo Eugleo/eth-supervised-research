@@ -7,7 +7,7 @@ import typer
 
 # Assuming these are defined somewhere
 from nnsight import LanguageModel
-from sv.datasets import ContrastiveDataset
+from sv.datasets import Dataset
 from sv.vectors import SteeringVector
 from typer import Argument, Option
 
@@ -29,7 +29,9 @@ def main(
         dataset_path = Path(data_dir) / dataset
         vector_dir = dataset_path / "vectors"
         vector_dir.mkdir(parents=True, exist_ok=True)
-        dataset = ContrastiveDataset.load(dataset_path / "generate.json")
+        dataset = Dataset.load(dataset_path / "generate.json").for_generating(
+            model.tokenizer
+        )
 
         for layer in layers:
             print(f"Processing layer {layer}...")

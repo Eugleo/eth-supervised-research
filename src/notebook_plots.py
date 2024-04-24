@@ -42,6 +42,7 @@ def distributions(data: pl.DataFrame):
         color="measured_token",
         animation_frame="intervention_coeff",
         facet_col="intervention_layer",
+        # facet_row="ordering",
         histnorm="percent",
         nbins=30,
         barmode="overlay",
@@ -64,14 +65,11 @@ fig.show()
 # %%
 def delta_per_layer(data: pl.DataFrame):
     baselines = data.filter(c("intervention_layer").is_null()).select(
-        "id",
-        "answer_is_first_option",
-        "measured_token",
-        c("measured_prob").alias("prob_baseline"),
+        "q_num", "ordering", "measured_token", c("measured_prob").alias("prob_baseline")
     )
 
     deltas = (
-        data.join(baselines, on=["id", "answer_is_first_option", "measured_token"])
+        data.join(baselines, on=["q_num", "ordering", "measured_token"])
         .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
         .group_by("intervention_layer", "intervention_coeff", "measured_token")
         .agg(c("delta").median().alias("delta_median"))
@@ -106,9 +104,9 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
         data.filter(
             (c("intervention_layer") == layer) | c("intervention_layer").is_null()
         )
-        .group_by("measured_token", "intervention_coeff", "answer_is_first_option")
+        .group_by("measured_token", "intervention_coeff", "ordering")
         .agg(c("measured_prob").median().alias("measured_prob_median"))
-        .sort("measured_token", "intervention_coeff", "answer_is_first_option")
+        .sort("measured_token", "intervention_coeff", "ordering")
     )
 
     return px.line(
@@ -121,7 +119,7 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
             "measured_prob_median": "Median of P(m. tok.)",
             "intervention_coeff": "Steering vector multiplier",
         },
-        facet_row="answer_is_first_option",
+        facet_row="ordering",
         title=f"Effect of steering multiplier in layer {layer}",
     )
 
