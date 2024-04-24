@@ -10,7 +10,7 @@ DATASET = "hallucination"
 
 dataset_dir = Path("../data") / DATASET
 data = pl.read_csv(
-    dataset_dir / "probs" / "test.csv", dtypes={"intervention_layer": pl.Int32}
+    dataset_dir / "probs" / "test.csv", dtypes={"intervention_layer": pl.Int32, "intervention_coeff": pl.Float64}
 )
 
 plot_dir = dataset_dir / "plots"
@@ -32,7 +32,7 @@ def distributions(data: pl.DataFrame):
         schema_overrides={"index": pl.UInt32},
     )
     baseline = baseline.join(coeff_df, on="index", how="left").drop("index")
-    data = data.filter(c("intervention_layer").is_not_null())
+    data = data.filter(c("intervention_layer").is_in([2, 5, 9]))
 
     return px.histogram(
         pl.concat([baseline, data])
@@ -71,7 +71,7 @@ def delta_per_layer(data: pl.DataFrame):
     deltas = (
         data.join(baselines, on=["q_num", "ordering", "measured_token"])
         .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
-        .group_by("intervention_layer", "intervention_coeff", "measured_token")
+        .group_by("intervention_layer", "intervention_coeff", "ordering", "measured_token")
         .agg(c("delta").median().alias("delta_median"))
         .sort("intervention_coeff", "intervention_layer", "measured_token")
     )
@@ -82,6 +82,7 @@ def delta_per_layer(data: pl.DataFrame):
         y="delta_median",
         color="intervention_coeff",
         facet_col="measured_token",
+        facet_row="ordering",
         render_mode="svg",
         markers=True,
         color_discrete_sequence=px.colors.sequential.RdBu_r,
@@ -127,3 +128,5 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
 fig = delta_per_coeff(data, layer=7)
 fig.write_image(plot_dir / "delta_per_coeff.pdf")
 fig.show()
+
+# %%
