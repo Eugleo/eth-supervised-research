@@ -6,7 +6,7 @@ import polars as pl
 from polars import col as c
 
 # %%
-DATASET = "hallucination"
+DATASET = "random"
 
 dataset_dir = Path("../data") / DATASET
 data = pl.read_csv(
@@ -73,7 +73,7 @@ def delta_per_layer(data: pl.DataFrame):
         .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
         .group_by("intervention_layer", "intervention_coeff", "ordering", "measured_token")
         .agg(c("delta").median().alias("delta_median"))
-        .sort("intervention_coeff", "intervention_layer", "measured_token")
+        .sort("intervention_coeff", "intervention_layer", "measured_token", "ordering")
     )
 
     return px.line(
