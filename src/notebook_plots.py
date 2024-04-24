@@ -32,7 +32,7 @@ def distributions(data: pl.DataFrame):
         schema_overrides={"index": pl.UInt32},
     )
     baseline = baseline.join(coeff_df, on="index", how="left").drop("index")
-    data = data.filter(c("intervention_layer").is_in([1, 3, 6, 9]))
+    data = data.filter(c("intervention_layer").is_in([1, 5, 9]))
 
     return px.histogram(
         pl.concat([baseline, data])
@@ -49,7 +49,7 @@ def distributions(data: pl.DataFrame):
         range_y=[0, 25],
         marginal="box",
         labels={
-            "measured_prob": "P(answer matching token)",
+            "measured_prob": "P(token)",
             "intervention_layer": "Layer",
             "intervention_coeff": "Steering vector multiplier",
         },
@@ -63,32 +63,31 @@ fig.show()
 
 # %%
 def delta_per_layer(data: pl.DataFrame):
-    baselines = (
-        data.filter(c("intervention_layer").is_null())
-        .group_by("measured_token")
-        .agg(c("measured_prob").median().alias("prob_baseline"))
+    baselines = data.filter(c("intervention_layer").is_null()).select(
+        "id", "most_recent", "measured_token", c("measured_prob").alias("prob_baseline")
     )
 
     deltas = (
-        data.group_by("intervention_layer", "measured_token", "intervention_coeff")
-        .agg(c("measured_prob").median().alias("measured_prob_median"))
-        .join(baselines, on=["measured_token"])
+        data.join(baselines, on=["id", "most_recent", "measured_token"])
         .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
+        .group_by("intervention_layer", "intervention_coeff", "measured_token")
+        .agg(c("delta").median().alias("delta_median"))
         .sort("intervention_coeff", "intervention_layer", "measured_token")
     )
 
     return px.line(
         deltas.to_pandas(),
         x="intervention_layer",
-        y="delta",
+        y="delta_median",
         color="intervention_coeff",
         facet_col="measured_token",
         render_mode="svg",
         markers=True,
         color_discrete_sequence=px.colors.sequential.RdBu_r,
         labels={
-            "delta": "Median of ∆P(answer matching token)",
-            "intervention_layer": "Layer where steering vector is applied",
+            "delta_median": "Median of ∆P(measured token)",
+            "intervention_layer": "Layer with intervention",
+            "intervention_coeff": "Steering vector multiplier",
         },
     )
 
@@ -104,10 +103,9 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
         data.filter(
             (c("intervention_layer") == layer) | c("intervention_layer").is_null()
         )
-        .group_by("measured_token", "intervention_coeff")
+        .group_by("measured_token", "intervention_coeff", "most_recent")
         .agg(c("measured_prob").median().alias("measured_prob_median"))
-        .select("measured_token", "intervention_coeff", "measured_prob_median")
-        .sort("measured_token", "intervention_coeff")
+        .sort("measured_token", "intervention_coeff", "most_recent")
     )
 
     return px.line(
@@ -117,9 +115,10 @@ def delta_per_coeff(data: pl.DataFrame, layer: int):
         color="measured_token",
         markers=True,
         labels={
-            "measured_prob_median": "P(answer matching token)",
+            "measured_prob_median": "Median of P(m. tok.)",
             "intervention_coeff": "Steering vector multiplier",
         },
+        facet_row="most_recent",
     )
 
 
