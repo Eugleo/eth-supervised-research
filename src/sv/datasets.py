@@ -59,6 +59,7 @@ class RimskyItem(TypedDict):
 class Format(str, Enum):
     rimsky = "rimsky"
     repeated = "repeated"
+    combined = "combined"
 
 
 @dataclass
@@ -91,7 +92,7 @@ class Item:
         self, ordering: tuple[str, str], format: Format, tokenizer: PreTrainedTokenizer
     ) -> Tuple[int, str, int, str]:
         first, second = ordering
-        if format == Format.rimsky:
+        if format == Format.rimsky or format == Format.combined:
             first_token: int = tokenizer(" A").input_ids[0]
             second_token: int = tokenizer(" B").input_ids[0]
         elif format == Format.repeated:
@@ -118,10 +119,12 @@ class Dataset:
     def __init__(self, items: List[Item], format: Format):
         self._items = items
         self._format = format
-        if format == "repeated":
+        if format == Format.repeated:
             self.make_prompt = Dataset._repeated_prompt
-        elif format == "rimsky":
+        elif format == Format.rimsky:
             self.make_prompt = Dataset._rimsky_prompt
+        elif format == Format.combined:
+            self.make_prompt = Dataset._combined_prompt
         else:
             raise ValueError(f"Invalid format: {format}")
 
@@ -173,6 +176,16 @@ class Dataset:
                 f"Option A: {first}",
                 f"Option B: {second}",
                 "Answer: Option",
+            ]
+        )
+
+    @staticmethod
+    def _combined_prompt(question: str, first: str, second: str):
+        return "\n\n".join(
+            [
+                f"Q: {question}\nOption A: {first}",
+                f"Q: {question}\nOption B: {second}",
+                f"Q: {question}\nOption",
             ]
         )
 

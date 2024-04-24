@@ -51,11 +51,16 @@ def load(
         task_n = len(datasets) * 2
         task_loading = progress.add_task("Loading and writing...", total=task_n)
         for name in datasets:
-            dataset_dir = Path(data_dir) / name
+            source_dir = Path(data_dir) / name
+            dataset_name = (
+                f"{name}_{format.name}" if format != Format.repeated else name
+            )
+            save_dir = Path(data_dir) / dataset_name
+            save_dir.mkdir(parents=True, exist_ok=True)
             for set in ["generate", "test"]:
-                orig_data = dataset_dir / "original" / f"{set}.json"
+                orig_data = source_dir / "original" / f"{set}.json"
                 dataset = Dataset.from_original(orig_data, format=format)
-                dataset.save(dataset_dir / f"{set}.json")
+                dataset.save(save_dir / f"{set}.json")
                 progress.update(task_loading, advance=1)
 
 
