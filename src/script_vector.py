@@ -17,7 +17,6 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 def main(
     datasets: Annotated[List[str], Argument()],
     data_dir: Annotated[str, Option()] = "data",
-    layers: Annotated[List[int], Option()] = list(range(12)),
     model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
     seed: Annotated[int, Option()] = 42,
     device: Annotated[str, Option()] = "cpu",
@@ -34,10 +33,8 @@ def main(
             model.tokenizer
         )
 
-        for layer in layers:
-            print(f"Processing layer {layer}...")
-            vector = SteeringVector.generate(model, dataset, layer)
-            vector.save(vector_dir / f"layer_{layer}.pt")
+        for vector in SteeringVector.generate(model, dataset):
+            vector.save(vector_dir / f"layer_{vector.layer}.pt")
 
 
 if __name__ == "__main__":
