@@ -30,7 +30,7 @@ def main(
         vector_dir = dataset_path / "vectors"
         vector_dir.mkdir(parents=True, exist_ok=True)
         dataset = Dataset.load(dataset_path / "generate.json").for_generating(
-            model.tokenizer
+            model.tokenizer, kind="turner"
         )
 
         for vector in SteeringVector.generate(model, dataset):

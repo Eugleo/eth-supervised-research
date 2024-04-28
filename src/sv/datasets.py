@@ -128,44 +128,62 @@ class Dataset:
         else:
             raise ValueError(f"Invalid format: {format}")
 
-    def for_generating(self, tokenizer: PreTrainedTokenizer) -> GenDataset:
+    def for_generating(self, tokenizer: PreTrainedTokenizer, kind: str) -> GenDataset:
         pairs: List[ContrastivePair] = []
         for item in self._items:
-            for first, second in [("pos", "neg"), ("neg", "pos")]:
-                _, pos_token_str, _, _ = item.get_tokens(
-                    (first, second), self._format, tokenizer
-                )
-                pos_prompt = self.make_prompt(*item.ordered(first, second))
-                _, _, _, neg_token_str = item.get_tokens(
-                    (second, first), self._format, tokenizer
-                )
-                neg_prompt = self.make_prompt(*item.ordered(second, first))
+            if kind == "rimsky":
+                for first, second in [("pos", "neg"), ("neg", "pos")]:
+                    _, pos_token_str, _, _ = item.get_tokens(
+                        (first, second), self._format, tokenizer
+                    )
+                    pos_prompt = self.make_prompt(*item.ordered(first, second))
+                    _, _, _, neg_token_str = item.get_tokens(
+                        (second, first), self._format, tokenizer
+                    )
+                    neg_prompt = self.make_prompt(*item.ordered(second, first))
+                    pairs.append(
+                        {
+                            "pos": pos_prompt + pos_token_str,
+                            "neg": neg_prompt + neg_token_str,
+                        }
+                    )
+            elif kind == "turner":
                 pairs.append(
                     {
-                        "pos": pos_prompt + pos_token_str,
-                        "neg": neg_prompt + neg_token_str,
+                        "pos": item.question + " " + item.pos,
+                        "neg": item.question + " " + item.neg,
                     }
                 )
 
         dataset = GenDataset(pairs)
         return dataset
 
-    def for_evaluating(self, tokenizer: PreTrainedTokenizer) -> EvalDataset:
+    def for_evaluating(self, tokenizer: PreTrainedTokenizer, kind: str) -> EvalDataset:
         prompts: List[Prompt] = []
         for i, item in enumerate(self._items):
-            for first, second in [("pos", "neg"), ("neg", "pos")]:
-                prompt = self.make_prompt(*item.ordered(first, second))
-                pos_token, _, neg_token, _ = item.get_tokens(
-                    (first, second), self._format, tokenizer
-                )
-                ordering = "pos,neg" if first == "pos" else "neg,pos"
+            if kind == "rimsky":
+                for first, second in [("pos", "neg"), ("neg", "pos")]:
+                    prompt = self.make_prompt(*item.ordered(first, second))
+                    pos_token, _, neg_token, _ = item.get_tokens(
+                        (first, second), self._format, tokenizer
+                    )
+                    ordering = "pos,neg" if first == "pos" else "neg,pos"
+                    prompts.append(
+                        {
+                            "q_num": i,
+                            "prompt": prompt,
+                            "ordering": ordering,
+                            "pos_token": pos_token,
+                            "neg_token": neg_token,
+                        }
+                    )
+            elif kind == "turner":
                 prompts.append(
                     {
                         "q_num": i,
-                        "prompt": prompt,
-                        "ordering": ordering,
-                        "pos_token": pos_token,
-                        "neg_token": neg_token,
+                        "prompt": item.question,
+                        "pos": item.pos,
+                        "neg": item.neg,
                     }
                 )
 
@@ -187,8 +205,8 @@ class Dataset:
     def _combined_prompt(question: str, first: str, second: str):
         return "\n\n".join(
             [
-                f"Q: {question}\nA: I choose option A: {first}",
-                f"Q: {question}\nA: I choose option B: {second}",
+                f"Q: {question}\nA: Option A: {first}",
+                f"Q: {question}\nA: Option B: {second}",
                 f"Q: {question}\nA: I choose option",
             ]
         )
@@ -214,9 +232,7 @@ class Dataset:
         return dataset
 
     @staticmethod
-    def from_randomized_original(
-        path: Path, format: Format
-    ) -> "Dataset":
+    def from_randomized_original(path: Path, format: Format) -> "Dataset":
         with open(path) as f:
             rimsky_items = json.load(f)
 
@@ -230,12 +246,7 @@ class Dataset:
         random.shuffle(neg)
 
         items: List[Item] = [
-            Item(question, pos, neg)
-            for question, pos, neg in zip(
-                questions,
-                pos,
-                neg
-            )
+            Item(question, pos, neg) for question, pos, neg in zip(questions, pos, neg)
         ]
         dataset = Dataset(items, format=format)
 
