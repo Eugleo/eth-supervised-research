@@ -11,7 +11,7 @@ from sv.datasets import Dataset
 from sv.vectors import SteeringVector
 
 # %%
-model = LanguageModel("openai-community/gpt2", device_map="cuda")
+model = LanguageModel("openai-community/gpt2", device_map="cpu")
 
 DATASET = "weddings_simple"
 
@@ -405,3 +405,58 @@ fig = loss_delta_per_coeff(data)
 fig = fig.update_yaxes(matches=None)
 # fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
 fig.show()
+
+# %%
+
+
+def p_successful_rollout(
+    model,
+    prompt,
+    coeff,
+    length=40,
+    batch_size=200,
+    keywords=[
+        "wedding",
+        "weddings",
+        "wed",
+        "marry",
+        "married",
+        "marriage",
+        "bride",
+        "groom",
+        "honeymoon",
+    ],
+):
+    results = []
+    batch = [prompt] * batch_size
+    for layer in range(model.config.n_layer):
+        sv = SteeringVector.load(
+            dataset_dir / "vectors" / f"layer_{layer}.pt", device="cpu"
+        )
+        with model.generate(
+            batch,
+            max_new_tokens=length,
+            scan=False,
+            validate=False,
+            pad_token_id=model.tokenizer.eos_token_id,
+            do_sample=True,
+            top_p=0.3,
+            temperature=1,
+        ) as _:
+            model.transformer.h[layer].output[0][:] += coeff * sv.vector
+            output = model.generator.output.save()
+        decoded = model.tokenizer.batch_decode(output, skip_special_tokens=True)
+        results.append(
+            {
+                "layer": layer,
+                "p_success": sum(any(k in d for k in keywords) for d in decoded)
+                / batch_size,
+            }
+        )
+
+    return px.line(pl.DataFrame(results).to_pandas(), x="layer", y="p_success")
+
+
+fig = p_successful_rollout(
+    model, "I went up to my friend and said", coeff=20, batch_size=1
+)
