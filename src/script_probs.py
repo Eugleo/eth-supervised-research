@@ -3,6 +3,7 @@ from functools import partial
 from pathlib import Path
 from typing import List, Optional
 
+import einops
 import polars as pl
 import sv.utils as utils
 import torch as t
@@ -16,6 +17,36 @@ from typer import Argument, Option
 from typing_extensions import Annotated
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
+
+
+def probs_for_prompts(model, prefixes, suffixes, sv, coeff):
+    criterion = t.nn.CrossEntropyLoss(reduction="none").to(model.device)
+    sequences = [f"{p} {s}" for p, s in zip(prefixes, suffixes)]
+    tokens = model.tokenizer(sequences, return_tensors="pt", padding=True).input_ids
+
+    total_length = tokens.size(1)
+    indices = t.arange(total_length)[None, :]
+
+    suffix_tokens = model.tokenizer(suffixes).input_ids
+    suffix_lengths = t.tensor([len(s) for s in suffix_tokens])[:, None]
+    is_prefix = indices < total_length - suffix_lengths
+
+    with t.no_grad(), model.trace(sequences, scan=False, validate=False) as _:
+        if sv and coeff != 0:
+            h = model.transformer.h[sv.layer].output[0]
+            h[is_prefix] += coeff * sv.vector
+        logits = model.output.logits
+        logits = einops.rearrange(logits, "b s tok -> b tok s").save()
+
+    tokens = tokens.to(logits.device)
+    losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
+
+    prefix_tokens = model.tokenizer(prefixes).input_ids
+    prefix_lengths = t.tensor([len(p) for p in prefix_tokens])[:, None]
+    is_padding = indices < total_length - suffix_lengths - prefix_lengths
+
+    losses[is_padding[:, :-1]] = 0
+    return losses.mean(-1).exp().tolist()
 
 
 def probs_for_batch(
@@ -50,31 +81,8 @@ def probs_for_batch(
     elif kind == "turner":
         prompts, neg, pos = (batch["prompt"], batch["neg"], batch["pos"])
 
-        neg_prompts = [p + " " + n for p, n in zip(prompts, neg)]
-        neg_tokens = model.tokenizer(
-            neg_prompts, return_tensors="pt", padding=True
-        ).input_ids
-
-        pos_prompts = [prompt + " " + p for prompt, p in zip(prompts, pos)]
-        pos_tokens = model.tokenizer(
-            pos_prompts, return_tensors="pt", padding=True
-        ).input_ids
-
-        with t.no_grad(), model.trace(scan=False, validate=False) as runner:
-            with runner.invoke(neg_prompts, labels=neg_tokens) as _:
-                if sv and coeff != 0:
-                    model.transformer.h[sv.layer].output[0][:] += coeff * sv.vector
-                # output = model.lm_head.output.t[:].logsoftmax(dim=-1)
-                # neg_probs = output[pos_prompts].product(dim=-1).tolist().save()
-                neg_loss = model.output.loss.item().save()
-
-        with t.no_grad(), model.trace(scan=False, validate=False) as runner:
-            with runner.invoke(pos_prompts, labels=pos_tokens) as _:
-                if sv and coeff != 0:
-                    model.transformer.h[sv.layer].output[0][:] += coeff * sv.vector
-                # output = model.lm_head.output.t[:].logsoftmax(dim=-1)
-                # neg_probs = output[pos_prompts].product(dim=-1).tolist().save()
-                pos_loss = model.output.loss.item().save()
+        neg_losses = probs_for_prompts(model, prompts, neg, sv, coeff)
+        pos_losses = probs_for_prompts(model, prompts, pos, sv, coeff)
 
         return [
             {
@@ -85,10 +93,7 @@ def probs_for_batch(
                 "intervention_layer": sv.layer if sv else None,
                 "intervention_coeff": coeff,
             }
-            for measured_token, probs in [
-                ("neg", [neg_loss.value] * len(batch["q_num"])),
-                ("pos", [pos_loss.value] * len(batch["q_num"])),
-            ]
+            for measured_token, probs in [("neg", neg_losses), ("pos", pos_losses)]
             for q_num, prob in zip(batch["q_num"], probs)
         ]
 
@@ -102,7 +107,7 @@ def probs_for_dataset(
 ):
     if 0 not in coeffs:
         raise ValueError("0 should be in the list of coefficients")
-    batch_size = 1 if model.device == "cpu" else 32
+    batch_size = 1 if model.device == "cpu" else 64
     loader = DataLoader(dataset, batch_size=batch_size)
     results = []
 
@@ -137,6 +142,7 @@ def main(
 ):
     if not coeffs:
         coeffs = t.linspace(-30, 30, steps=21).tolist()
+        # coeffs = [-20, -10, 0, 10, 20]
 
     utils.set_seed(seed)
     model = LanguageModel(model_id, device_map=device, dispatch=True)

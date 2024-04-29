@@ -13,14 +13,14 @@ from sv.vectors import SteeringVector
 # %%
 model = LanguageModel("openai-community/gpt2", device_map="cuda")
 
-DATASET = "gender"
+DATASET = "weddings_simple"
 
 dataset_dir = Path("../data") / DATASET
+dataset = Dataset.load(dataset_dir / "test.json")
 data = pl.read_csv(
-    dataset_dir / "probs" / "generate.csv",
+    dataset_dir / "probs" / "test.csv",
     dtypes={"intervention_layer": pl.Int32, "intervention_coeff": pl.Float64},
 )
-dataset = Dataset.load(dataset_dir / "test.json")
 
 plot_dir = dataset_dir / "plots"
 plot_dir.mkdir(exist_ok=True, parents=True)
@@ -51,6 +51,31 @@ sentence_stubs = [
     "She cared for every plant in her garden, nurturing them with love and patience. That's why her dad always called her his little",
 ]
 
+wedding_stubs = sentence_stubs = sentence_stubs = [
+    # Implies "wedding"
+    "Dressed in a flowing white gown, she walked down the aisle, her eyes locked on her future. It was the perfect day for a",
+    "They exchanged rings and vows, promising to love and cherish each other forever. Everyone gathered to celebrate their",
+    "The venue was decorated with flowers and lights, creating a magical atmosphere for their",
+    "As the couple shared their first dance, surrounded by family and friends, it was clear this was no ordinary",
+    "Every detail, from the cake to the music, had been meticulously planned for their special",
+    "He stood at the altar, waiting nervously for her to walk down the aisle, a moment they had dreamed of, their",
+    "Guests threw rice as the newlyweds walked hand in hand, the perfect send-off from their",
+    "The toast was heartfelt, bringing tears and laughter, a memorable moment at their",
+    "She tossed the bouquet, surrounded by hopefuls ready to catch it, a tradition at every",
+    "Their names were elegantly displayed on the welcome sign, marking the entrance to their",
+    # Implies a specific other place
+    "The smell of old books filled the air, a quiet sanctuary lined with shelves, a classic",
+    "Lights flashed and music blared, a space alive with energy and movement, clearly a",
+    "Rows of seats stretched out before the stage, the curtain ready to rise on tonight's performance at the",
+    "Animals roamed freely, observed by families and children with delight, an afternoon spent at the",
+    "The sound of waves crashing, sand between your toes, a serene day at the",
+    "Stalls overflowed with fresh produce and handmade goods, a bustling morning at the",
+    "Art adorned the walls, from classic to contemporary, visitors wandering through the",
+    "Screens lit up with the latest blockbusters, a line forming at the popcorn stand, a night out at the",
+    "The roar of the crowd, the thrill of the game, all eyes on the field at the",
+    "Tents and stages set up, music echoing late into the night, the unmistakable vibe of a",
+]
+
 
 def bold_prompt(text, prompt):
     result = text.removeprefix(prompt).strip()
@@ -63,7 +88,16 @@ def bold_prompt(text, prompt):
     return f"[{color}]{result}[/{color}]"
 
 
-def generate_text(prompts, coeff: float):
+def wedding_prompt(text, prompt):
+    result = text.removeprefix(prompt).strip()
+    if result.lower() in ["wedding", "groom", "bride"]:
+        color = "green"
+    else:
+        color = "gray"
+    return f"[{color}]{result}[/{color}]"
+
+
+def generate_text(prompts, coeff: float, func=bold_prompt):
     table = Table(
         "# L",
         *[f"Ex. {n}" for n in range(len(prompts))],
@@ -73,7 +107,7 @@ def generate_text(prompts, coeff: float):
     )
 
     with model.generate(
-        max_new_tokens=1,
+        max_new_tokens=3,
         scan=False,
         validate=False,
         pad_token_id=model.tokenizer.eos_token_id,
@@ -86,7 +120,7 @@ def generate_text(prompts, coeff: float):
     )
 
     table.add_row(
-        "—", *[f"[b]{bold_prompt(t, p)}[/b]" for p, t in zip(prompts, decoded_output)]
+        "—", *[f"[b]{func(t, p)}[/b]" for p, t in zip(prompts, decoded_output)]
     )
 
     for layer in range(12):
@@ -108,15 +142,36 @@ def generate_text(prompts, coeff: float):
             steered_output, skip_special_tokens=True
         )
         table.add_row(
-            f"{layer}",
-            *[bold_prompt(t, p) for p, t in zip(prompts, decoded_output)],
+            f"{layer}", *[func(t, p) for p, t in zip(prompts, decoded_output)]
         )
 
     rprint(table)
 
 
-for coeff in [0, 1, 5, 10]:
-    generate_text(sentence_stubs[10:], coeff)
+for coeff in [0, 1, 5]:
+    generate_text(wedding_stubs[5:15], coeff, func=wedding_prompt)
+
+
+# %%
+def generate_freeform(prompt, coeff, layer):
+    sv = SteeringVector.load(
+        dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
+    )
+
+    with model.generate(
+        max_new_tokens=100,
+        scan=False,
+        validate=False,
+        pad_token_id=model.tokenizer.eos_token_id,
+    ) as runner:
+        with runner.invoke(prompt, scan=False) as _:
+            h = model.transformer.h[layer].output[0]
+            h[:] += coeff * sv.vector
+            steered_output = model.generator.output.save()
+    print(model.tokenizer.batch_decode(steered_output)[0])
+
+
+generate_freeform("I went up to my friend and said: I'm never going to your", 6, 10)
 
 
 # %%
@@ -204,33 +259,62 @@ fig.show()
 
 
 # %%
-def delta_per_coeff(data: pl.DataFrame):
-    probs = (
-        data.group_by("measured_token", "intervention_coeff", "intervention_layer")
-        .agg(c("measured_prob").median().alias("measured_prob_median"))
-        .sort("measured_token", "intervention_coeff", "intervention_layer")
+def loss_delta_per_coeff(data: pl.DataFrame):
+    baselines = (
+        data.filter(c("intervention_coeff") == 0)
+        .select(
+            "q_num",
+            "measured_token",
+            c("measured_prob").alias("prob_baseline"),
+        )
+        .unique()
+    )
+
+    deltas = data.join(baselines, on=["q_num", "measured_token"]).with_columns(
+        (c("measured_prob").log() - c("prob_baseline").log()).alias("delta")
+    )
+
+    pos_probs = deltas.filter(c("measured_token") == "pos")
+    neg_probs = deltas.filter(c("measured_token") == "neg")
+
+    result = (
+        pos_probs.join(
+            neg_probs,
+            on=["q_num", "intervention_layer", "intervention_coeff", "ordering"],
+            suffix="_neg",
+        )
+        .group_by("intervention_layer", "intervention_coeff", "measured_token")
+        .agg((c("delta") - c("delta_neg")).median().alias("delta_median"))
+        .sort("intervention_coeff", "intervention_layer", "measured_token")
+    )
+
+    myscale = px.colors.sample_colorscale(
+        colorscale=px.colors.sequential.RdBu_r,
+        samplepoints=len(deltas["intervention_coeff"].unique()),
+        low=0.0,
+        high=1.0,
+        colortype="rgb",
     )
 
     return px.line(
-        probs.to_pandas(),
-        x="intervention_coeff",
-        y="measured_prob_median",
-        color="measured_token",
+        result.to_pandas(),
+        x="intervention_layer",
+        y="delta_median",
+        color="intervention_coeff",
         markers=True,
         labels={
-            "measured_prob_median": "Median of loss(response)",
+            "delta_median": "Median ∆LogPerplexity(completion)",
             "intervention_coeff": "Steering vector multiplier",
-            "measured_token": "Response",
+            "measured_token": "Completion",
         },
-        facet_row="intervention_layer",
-        title=f"Effect of steering multiplier on loss(response) per layer",
-        height=3200,
+        facet_row="measured_token",
+        color_discrete_sequence=myscale,
+        title="Effect of steering multiplier on loss(response) per layer",
     )
 
 
-fig = delta_per_coeff(data)
-fig = fig.update_yaxes(matches=None)
-fig.write_image(plot_dir / "delta_per_coeff.pdf")
+fig = loss_delta_per_coeff(data)
+# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
 fig.show()
 
 
@@ -247,9 +331,10 @@ def loss_delta_per_coeff(data: pl.DataFrame):
         )
         .with_columns(delta=c("measured_prob") - c("measured_prob_neg"))
         .group_by("intervention_layer", "intervention_coeff")
-        .agg(c("delta").mean().alias("delta_median"))
+        .agg(c("delta").median().alias("delta_median"))
         .with_columns(positive=c("delta_median") > 0)
         .sort("intervention_coeff", "intervention_layer")
+        .filter(c("intervention_coeff").abs() < 22)
     )
 
     return px.line(
@@ -259,7 +344,7 @@ def loss_delta_per_coeff(data: pl.DataFrame):
         color="positive",
         markers=True,
         labels={
-            "delta_median": "Median of loss(pos) – loss(neg)",
+            "delta_median": "Median of per(pos) – loss(neg)",
             "intervention_coeff": "Steering vector multiplier",
         },
         facet_row="intervention_layer",
@@ -269,7 +354,54 @@ def loss_delta_per_coeff(data: pl.DataFrame):
 
 
 fig = loss_delta_per_coeff(data)
+fig = fig.update_yaxes(matches=None)
 fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
 fig.show()
 
+
 # %%
+def loss_delta_per_coeff(data: pl.DataFrame):
+    pos_probs = data.filter(c("measured_token") == "pos")
+    neg_probs = data.filter(c("measured_token") == "neg")
+
+    deltas = (
+        pos_probs.join(
+            neg_probs,
+            on=["q_num", "intervention_layer", "intervention_coeff", "ordering"],
+            suffix="_neg",
+        )
+        .with_columns(delta=c("measured_prob").log() - c("measured_prob_neg").log())
+        .group_by("intervention_layer", "intervention_coeff")
+        .agg(c("delta").mean().alias("delta_median"))
+        .with_columns(positive=c("delta_median") > 0)
+        .sort("intervention_layer", "intervention_coeff")
+        # .filter(c("intervention_layer") < 10)
+    )
+
+    myscale = px.colors.sample_colorscale(
+        colorscale=px.colors.sequential.RdBu_r,
+        samplepoints=len(deltas["intervention_coeff"].unique()),
+        low=0.0,
+        high=1.0,
+        colortype="rgb",
+    )
+
+    return px.line(
+        deltas.to_pandas(),
+        x="intervention_layer",
+        y="delta_median",
+        color="intervention_coeff",
+        markers=True,
+        labels={
+            "delta_median": "Median ∆LogPerplexity",
+            "intervention_coeff": "Steering vector multiplier",
+        },
+        color_discrete_sequence=myscale,
+        title="Effect of steering multiplier on loss(response) per layer",
+    )
+
+
+fig = loss_delta_per_coeff(data)
+fig = fig.update_yaxes(matches=None)
+# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
+fig.show()
