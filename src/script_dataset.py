@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 
 import typer
 from rich.progress import Progress
@@ -63,6 +63,39 @@ def load_randomize(
                 dataset = Dataset.from_randomized_original(orig_data, format=format)
                 dataset.save(save_dir / f"{set}.json")
                 progress.update(task_loading, advance=1)
+
+
+@app.command()
+def load_gpt(
+    datasets: Annotated[List[str], Argument()],
+    test_size: Annotated[int, Option()] = 50,
+    format: Annotated[Format, Option()] = Format.repeated,
+    data_dir: Annotated[str, Option()] = "data",
+    seed: Annotated[int, Option()] = 42,
+):
+    utils.set_seed(seed)
+
+    with Progress() as progress:
+        task_n = len(datasets)
+        task_loading = progress.add_task("Loading and writing...", total=task_n)
+        for name in datasets:
+            source_dir = Path(data_dir) / name
+            dataset_name = (
+                f"{name}_{format.name}" if format != Format.repeated else name
+            )
+            save_dir = Path(data_dir) / dataset_name
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            orig_data = source_dir / "gpt" / "source.json"
+            train, test = Dataset.from_gpt_generated(
+                orig_data, test_size=test_size, format=format
+            )
+            train.save(save_dir / "generate.json")
+            print(f"Dataset for generating: {len(train)} items")
+            test.save(save_dir / "test.json")
+            print(f"Dataset for testing: {len(test)} items")
+            progress.update(task_loading, advance=1)
+
 
 @app.command()
 def load(

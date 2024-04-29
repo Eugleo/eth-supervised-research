@@ -71,8 +71,11 @@ class Item:
     def ordered(self, first: str, second: str) -> tuple[str, str, str]:
         return self.question, getattr(self, first), getattr(self, second)
 
+    def __hash__(self) -> int:
+        return hash((self.question, self.pos, self.neg))
+
     @staticmethod
-    def from_rimsky_item(rimsky_item: RimskyItem) -> "Item":
+    def from_rimsky_item(rimsky_item: RimskyItem, matching=None) -> "Item":
         match = re.match(
             r"(.+?)(?:Choices:)?\s+\(A\)(.+)\s+\(B\)(.+)",
             rimsky_item["question"],
@@ -81,10 +84,14 @@ class Item:
         if not match:
             raise ValueError(f"Invalid question: {rimsky_item['question']}")
 
+        if matching is None:
+            if rimsky_item["answer_matching_behavior"] == "(A)":
+                matching = "first"
+            else:
+                matching = "second"
+
         question, a, b = [text.strip() for text in match.groups()]
-        pos, neg = (
-            (a, b) if rimsky_item["answer_matching_behavior"] == "(A)" else (b, a)
-        )
+        pos, neg = (a, b) if matching == "first" else (b, a)
 
         return Item(question, pos, neg)
 
@@ -127,6 +134,9 @@ class Dataset:
             self.make_prompt = Dataset._combined_prompt
         else:
             raise ValueError(f"Invalid format: {format}")
+
+    def __len__(self):
+        return len(self._items)
 
     def for_generating(self, tokenizer: PreTrainedTokenizer, kind: str) -> GenDataset:
         pairs: List[ContrastivePair] = []
@@ -230,6 +240,25 @@ class Dataset:
         dataset = Dataset(items, format=format)
 
         return dataset
+
+    @staticmethod
+    def from_gpt_generated(
+        path: Path, test_size: int, format: Format
+    ) -> tuple["Dataset", "Dataset"]:
+        with open(path) as f:
+            rimsky_items = json.load(f)
+
+        items = [Item.from_rimsky_item(i, matching="first") for i in rimsky_items]
+        if test_size > len(items):
+            raise ValueError(f"Not enough items for chosen test size: {len(items)}")
+        if len(set(items)) < len(items):
+            raise ValueError("Items are not unique")
+
+        random.shuffle(items)
+        train = Dataset(items[:-test_size], format=format)
+        test = Dataset(items[-test_size:], format=format)
+
+        return train, test
 
     @staticmethod
     def from_randomized_original(path: Path, format: Format) -> "Dataset":
