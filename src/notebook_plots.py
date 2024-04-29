@@ -701,12 +701,16 @@ fig = px.line(
     labels={"intervention_layer": "Layer"},
     markers=True,
     title=f"Pareto front for layer {layer}",
+    custom_data=["intervention_coeff"],
 )
 # fig.update_yaxes(matches=None)
 # fig.update_xaxes(matches=None)
 fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
 fig.add_vline(x=baseline_perplexity, line_dash="dot", line_color="red")
 fig.write_image(plot_dir / "pareto.pdf")
+fig.update_traces(
+    hovertemplate="<br>".join(["ColX: %{x}", "ColY: %{y}", "Col1: %{customdata[0]}"])
+)
 
 fig.show()
 # %%
