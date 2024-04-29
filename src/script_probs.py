@@ -41,11 +41,7 @@ def probs_for_prompts(model, prefixes, suffixes, sv, coeff):
     tokens = tokens.to(logits.device)
     losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
 
-    prefix_tokens = model.tokenizer(prefixes).input_ids
-    prefix_lengths = t.tensor([len(p) for p in prefix_tokens])[:, None]
-    is_padding = indices < total_length - suffix_lengths - prefix_lengths
-
-    losses[is_padding[:, :-1]] = 0
+    losses[is_prefix[:, :-1]] = 0
     return losses.mean(-1).exp().tolist()
 
 

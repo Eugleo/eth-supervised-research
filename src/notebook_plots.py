@@ -1,17 +1,41 @@
 # %%
+import re
 from pathlib import Path
 
 import plotly.express as px
 import polars as pl
+import torch as t
 from nnsight import LanguageModel
 from polars import col as c
 from rich import print as rprint
+from rich.progress import Progress
 from rich.table import Table
 from sv.datasets import Dataset
 from sv.vectors import SteeringVector
 
+
+def set_seed(seed: int) -> None:
+    import os
+    import random
+
+    import numpy as np
+
+    np.random.seed(seed)
+    random.seed(seed)
+    t.manual_seed(seed)
+    t.cuda.manual_seed(seed)
+    # When running on the CuDNN backend, two further options must be set
+    t.backends.cudnn.deterministic = True
+    t.backends.cudnn.benchmark = False
+    # Set a fixed value for the hash seed
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    print(f"Random seed set as {seed}")
+
+
+set_seed(42)
+
 # %%
-model = LanguageModel("openai-community/gpt2", device_map="cpu")
+model = LanguageModel("openai-community/gpt2", device_map="cuda", dispatch=True)
 
 DATASET = "weddings_simple"
 
@@ -51,7 +75,7 @@ sentence_stubs = [
     "She cared for every plant in her garden, nurturing them with love and patience. That's why her dad always called her his little",
 ]
 
-wedding_stubs = sentence_stubs = sentence_stubs = [
+wedding_stubs = [
     # Implies "wedding"
     "Dressed in a flowing white gown, she walked down the aisle, her eyes locked on her future. It was the perfect day for a",
     "They exchanged rings and vows, promising to love and cherish each other forever. Everyone gathered to celebrate their",
@@ -77,14 +101,14 @@ wedding_stubs = sentence_stubs = sentence_stubs = [
 ]
 
 
-def bold_prompt(text, prompt):
+def gender_prompt(text, prompt):
     result = text.removeprefix(prompt).strip()
     if result in ["boy", "brother", "father", "man"]:
-        color = "blue"
+        color = "dark_blue"
     elif result in ["girl", "sister", "mother", "woman"]:
         color = "hot_pink3"
     else:
-        color = "dark_blue"
+        color = "gray"
     return f"[{color}]{result}[/{color}]"
 
 
@@ -97,7 +121,7 @@ def wedding_prompt(text, prompt):
     return f"[{color}]{result}[/{color}]"
 
 
-def generate_text(prompts, coeff: float, func=bold_prompt):
+def generate_text(prompts, coeff: float, func=gender_prompt):
     table = Table(
         "# L",
         *[f"Ex. {n}" for n in range(len(prompts))],
@@ -148,8 +172,8 @@ def generate_text(prompts, coeff: float, func=bold_prompt):
     rprint(table)
 
 
-for coeff in [0, 1, 5]:
-    generate_text(wedding_stubs[5:15], coeff, func=wedding_prompt)
+for coeff in [1]:
+    generate_text(sentence_stubs[10:], coeff, func=gender_prompt)
 
 
 # %%
@@ -159,10 +183,13 @@ def generate_freeform(prompt, coeff, layer):
     )
 
     with model.generate(
-        max_new_tokens=100,
+        max_new_tokens=10,
         scan=False,
         validate=False,
         pad_token_id=model.tokenizer.eos_token_id,
+        do_sample=True,
+        top_p=0.6,
+        temperature=1,
     ) as runner:
         with runner.invoke(prompt, scan=False) as _:
             h = model.transformer.h[layer].output[0]
@@ -171,7 +198,7 @@ def generate_freeform(prompt, coeff, layer):
     print(model.tokenizer.batch_decode(steered_output)[0])
 
 
-generate_freeform("I went up to my friend and said: I'm never going to your", 6, 10)
+generate_freeform("Between a doll and a toy gun, I prefer the", 8, 8)
 
 
 # %%
@@ -254,7 +281,7 @@ def delta_per_layer(data: pl.DataFrame):
 
 
 fig = delta_per_layer(data)
-fig.write_image(plot_dir / "delta_per_layer.pdf")
+# fig.write_image(plot_dir / "delta_per_layer.pdf")
 fig.show()
 
 
@@ -271,7 +298,7 @@ def loss_delta_per_coeff(data: pl.DataFrame):
     )
 
     deltas = data.join(baselines, on=["q_num", "measured_token"]).with_columns(
-        (c("measured_prob").log() - c("prob_baseline").log()).alias("delta")
+        (c("measured_prob") - c("prob_baseline")).alias("delta")
     )
 
     pos_probs = deltas.filter(c("measured_token") == "pos")
@@ -303,7 +330,7 @@ def loss_delta_per_coeff(data: pl.DataFrame):
         color="intervention_coeff",
         markers=True,
         labels={
-            "delta_median": "Median ∆LogPerplexity(completion)",
+            "delta_median": "Median ∆Perplexity(completion)",
             "intervention_coeff": "Steering vector multiplier",
             "measured_token": "Completion",
         },
@@ -355,7 +382,7 @@ def loss_delta_per_coeff(data: pl.DataFrame):
 
 fig = loss_delta_per_coeff(data)
 fig = fig.update_yaxes(matches=None)
-fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
+# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
 fig.show()
 
 
@@ -406,13 +433,18 @@ fig = fig.update_yaxes(matches=None)
 # fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
 fig.show()
 
+
 # %%
+def has_keyword(text, keywords):
+    if any(k in text for k in keywords):
+        return any(re.findall(rf"\b{k}\b", text) for k in keywords)
+    return False
 
 
 def p_successful_rollout(
     model,
     prompt,
-    coeff,
+    coeffs=[0, 2, 4, 6, 8, 10, 12, 16, 20],
     length=40,
     batch_size=200,
     keywords=[
@@ -427,36 +459,254 @@ def p_successful_rollout(
         "honeymoon",
     ],
 ):
-    results = []
+    rollouts = []
     batch = [prompt] * batch_size
-    for layer in range(model.config.n_layer):
-        sv = SteeringVector.load(
-            dataset_dir / "vectors" / f"layer_{layer}.pt", device="cpu"
+
+    with t.no_grad(), model.generate(
+        batch,
+        max_new_tokens=length,
+        scan=False,
+        validate=False,
+        pad_token_id=model.tokenizer.eos_token_id,
+        do_sample=True,
+        top_p=0.3,
+        temperature=1,
+    ) as _:
+        baseline_output = model.generator.output.save()
+    baseline_decoded = model.tokenizer.batch_decode(
+        baseline_output, skip_special_tokens=True
+    )
+    baseline_p_success = (
+        sum(any(k in d for k in keywords) for d in baseline_decoded) / batch_size
+    )
+
+    with Progress() as progress:
+        task = progress.add_task(
+            "Generating rollouts...", total=len(coeffs) * model.config.n_layer
         )
-        with model.generate(
-            batch,
-            max_new_tokens=length,
-            scan=False,
-            validate=False,
-            pad_token_id=model.tokenizer.eos_token_id,
-            do_sample=True,
-            top_p=0.3,
-            temperature=1,
-        ) as _:
-            model.transformer.h[layer].output[0][:] += coeff * sv.vector
-            output = model.generator.output.save()
-        decoded = model.tokenizer.batch_decode(output, skip_special_tokens=True)
-        results.append(
-            {
-                "layer": layer,
-                "p_success": sum(any(k in d for k in keywords) for d in decoded)
-                / batch_size,
-            }
+        for layer in [7, 8, 9, 10]:
+            sv = SteeringVector.load(
+                dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
+            )
+            for coeff in coeffs:
+                with t.no_grad(), model.generate(
+                    batch,
+                    max_new_tokens=length,
+                    scan=False,
+                    validate=False,
+                    pad_token_id=model.tokenizer.eos_token_id,
+                    do_sample=True,
+                    top_p=0.9,
+                    temperature=1,
+                ) as _:
+                    model.transformer.h[layer].output[0][:] += coeff * sv.vector
+                    steered_output = model.generator.output.save()
+                decoded = model.tokenizer.batch_decode(
+                    steered_output, skip_special_tokens=True
+                )
+                rollouts.append(
+                    {
+                        "intervention_layer": layer,
+                        "p_success": sum(has_keyword(d, keywords) for d in decoded)
+                        / batch_size,
+                        "intervention_coeff": coeff,
+                    }
+                )
+                progress.update(task, advance=1)
+    rollouts = pl.DataFrame(rollouts)
+    fig = px.line(
+        rollouts.to_pandas(),
+        x="layer",
+        y="p_success",
+        color="coeff",
+        markers=True,
+        color_discrete_sequence=px.colors.sequential.OrRd,
+    )
+    fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
+    return rollouts, fig
+
+
+rollouts, fig = p_successful_rollout(model, "I think you're", batch_size=200)
+fig.show()
+
+# %%
+fig.write_image(plot_dir / "p_success_per_layer_and_coeff.pdf")
+
+# %%
+
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+
+openweb = load_dataset("Skylion007/openwebtext", streaming=True)
+
+# %%
+
+import einops
+
+
+def perplexity(model, prompts, sv, coeff):
+    criterion = t.nn.CrossEntropyLoss(reduction="none").to(model.device)
+    tokens = model.tokenizer(
+        prompts, return_tensors="pt", padding=True, truncation=True
+    ).input_ids
+
+    with t.no_grad(), model.trace(tokens, scan=False, validate=False) as _:
+        if sv and coeff != 0:
+            h = model.transformer.h[sv.layer].output[0]
+            h[:, :128] += coeff * sv.vector
+        logits = model.output.logits
+        logits = einops.rearrange(logits, "b s tok -> b tok s").save()
+
+    tokens = tokens.to(logits.device)
+    losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
+
+    return losses[:, 128:].mean(-1).tolist()
+
+
+def compute_perplexity(model, dataset, batch_size=8, items=8):
+    loader = DataLoader(dataset["train"].with_format("torch"), batch_size=batch_size)
+    results = []
+    for i, item in enumerate(loader):
+        if i >= items:
+            break
+
+        tokens = model.tokenizer(
+            item["text"], return_tensors="pt", truncation=True, padding=True
+        ).input_ids
+
+        baseline_pps = compute_mean_perplexity(gpt, tokens)
+        results.extend(
+            [
+                {
+                    "document": doc,
+                    "measured_prob": float(baseline_p),
+                    "intervention_layer": None,
+                    "intervention_coeff": 0,
+                }
+                for doc, baseline_p in enumerate(baseline_pps)
+            ]
         )
+        for layer in [10]:
+            sv = SteeringVector.load(
+                dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
+            )
+            for coeff in [2, 4, 6, 8, 10, 12, 16, 20]:
+                pps = perplexity(model, item["text"], sv, coeff)
+                results.extend(
+                    [
+                        {
+                            "document": doc,
+                            "measured_prob": float(p),
+                            "intervention_layer": sv.layer,
+                            "intervention_coeff": coeff,
+                        }
+                        for doc, p in enumerate(pps)
+                    ]
+                )
+    return pl.DataFrame(results)
 
-    return px.line(pl.DataFrame(results).to_pandas(), x="layer", y="p_success")
+
+df = compute_perplexity(model, openweb)
+
+# %%
+import torch
+from transformers import AutoModelForCausalLM
 
 
-fig = p_successful_rollout(
-    model, "I went up to my friend and said", coeff=20, batch_size=1
+def compute_mean_perplexity(model, batch):
+    # Ensure model is in evaluation mode
+    model.eval()
+
+    # Compute the model's output
+    with torch.no_grad():
+        outputs = model(batch)
+        logits = outputs.logits
+
+    # Compute the loss at the token level
+    loss_fct = t.nn.CrossEntropyLoss(reduction="none")
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = batch[..., 1:].contiguous()
+    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+    # Reshape the loss back to the original shape
+    loss = loss.view_as(shift_labels)
+
+    # Ignore the first 128 tokens for the perplexity computation
+    loss = loss[:, 128:]
+
+    # Compute the perplexity of the sequence
+    perplexity = torch.exp(loss)
+
+    # Compute and return the mean perplexity
+    return loss.mean(-1).tolist()
+
+
+gpt = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
+
+# item = next(openweb["train"].__iter__())
+tokens = model.tokenizer(item["text"], return_tensors="pt", truncation=True).input_ids
+
+perp = compute_mean_perplexity(gpt, tokens)
+perp
+
+# %%
+
+
+def perplexity(model, prompts, sv, coeff):
+    criterion = t.nn.CrossEntropyLoss(reduction="none").to(model.device)
+    tokens = model.tokenizer(
+        prompts, return_tensors="pt", padding=True, truncation=True
+    ).input_ids
+
+    with t.no_grad(), model.trace(tokens, scan=False, validate=False) as _:
+        # if sv and coeff != 0:
+        #     h = model.transformer.h[sv.layer].output[0]
+        #     h[is_prefix] += coeff * sv.vector
+        logits = model.output.logits
+        logits = einops.rearrange(logits, "b s tok -> b tok s").save()
+
+    tokens = tokens.to(logits.device)
+    losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
+
+    return losses[:, 128:].exp().mean(-1).tolist()
+
+
+perplexity(model, item["text"], None, 0)
+
+# %%
+
+layer = 10
+
+baseline_perplexity = df.filter(c("intervention_layer").is_null())[
+    "measured_prob"
+].median()
+baseline_p_success = (
+    rollouts.filter(c("intervention_coeff") == 0)
+    .filter(c("intervention_layer") == layer)["p_success"]
+    .median()
 )
+
+pareto = (
+    df.group_by("intervention_layer", "intervention_coeff")
+    .agg(c("measured_prob").median().alias("mean_perplexity"))
+    .join(rollouts, on=["intervention_layer", "intervention_coeff"])
+    .filter(c("intervention_layer") == layer)
+    .sort("mean_perplexity", "p_success")
+)
+
+fig = px.line(
+    pareto.to_pandas(),
+    x="mean_perplexity",
+    y="p_success",
+    labels={"intervention_layer": "Layer"},
+    markers=True,
+    title=f"Pareto front for layer {layer}",
+)
+# fig.update_yaxes(matches=None)
+# fig.update_xaxes(matches=None)
+fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
+fig.add_vline(x=baseline_perplexity, line_dash="dot", line_color="red")
+fig.write_image(plot_dir / "pareto.pdf")
+
+fig.show()
+# %%
