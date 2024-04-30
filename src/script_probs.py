@@ -10,7 +10,7 @@ import torch as t
 import typer
 from nnsight import LanguageModel
 from rich.progress import Progress
-from sv.datasets import Dataset, EvalDataset
+from sv.datasets import Dataset, DictDataset
 from sv.vectors import SteeringVector
 from torch.utils.data import DataLoader
 from typer import Argument, Option
@@ -97,7 +97,7 @@ def probs_for_batch(
 @t.inference_mode()
 def probs_for_dataset(
     model: LanguageModel,
-    dataset: EvalDataset,
+    dataset: DictDataset,
     steering_vectors: List[SteeringVector],
     coeffs: List[float],
 ):
@@ -153,7 +153,7 @@ def main(
             if only_test and set != "test":
                 continue
 
-            data = Dataset.load(dataset_dir / f"{set}.json").for_evaluating(
+            data = Dataset.load(dataset_dir / f"{set}.json").for_evaluation(
                 tokenizer=model.tokenizer, kind="turner"
             )
             probs = probs_for_dataset(model, data, vectors, coeffs)

@@ -29,11 +29,11 @@ def main(
         dataset_path = Path(data_dir) / dataset
         vector_dir = dataset_path / "vectors"
         vector_dir.mkdir(parents=True, exist_ok=True)
-        dataset = Dataset.load(dataset_path / "generate.json").for_generating(
+        dataset = Dataset.load(dataset_path / "generate.json").for_vector_generation(
             model.tokenizer, kind="turner"
         )
 
-        for vector in SteeringVector.generate(model, dataset):
+        for vector in SteeringVector.generate_all(model, dataset):
             vector.save(vector_dir / f"layer_{vector.layer}.pt")
 
 

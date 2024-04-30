@@ -1,5 +1,21 @@
 #  Utilizing SAE Features for Activation Steering
 
+## Quickstart
+
+Make sure you have `pyenv` installed, or otherwise that you're using python 3.11.
+
+```shell
+python -m venv .venv
+pip install --editable .
+```
+
+This will create a new executable `sv` through which you can access the different scripts in this project.
+
+- `sv dataset` for creating a dataset from a Rimsky's dataset or a GPT-generated one
+- `sv vectors` for constructni
+
+## Plan
+
 Below is a rough flowchart of different things that need to be done, mostly prerequisites for the actual research.
 
 Critical steps that need to work for the project to make sense are highlighted in red, with comments below the flowchart.
