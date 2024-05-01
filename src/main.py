@@ -2,11 +2,14 @@ import os
 from pathlib import Path
 from typing import Annotated, List
 
+import polars as pl
 import sv.utils as utils
+import torch as t
 import typer
 from nnsight import LanguageModel
 from rich.progress import Progress
-from sv.datasets import Dataset
+from sv.datasets import Dataset, DictDataset
+from sv.loss import compute_spliced_llm_loss
 from sv.vectors import SteeringVector
 from typer import Argument, Option
 
@@ -15,22 +18,84 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 app = typer.Typer()
 
 
-def current_version(path: Path) -> tuple[int, Path]:
-    with open(path / ".version") as f:
-        version = int(f.read().strip())
-        return version, path / f"v{version}"
+@app.command()
+def compute_loss(
+    datasets: Annotated[List[str], Argument()],
+    multipliers: Annotated[List[float], Option()] = [],
+    data_dir: Annotated[str, Option()] = "data",
+    model_id: Annotated[str, Option("--model")] = "openai-community/gpt2",
+    seed: Annotated[int, Option()] = 42,
+    device: Annotated[str, Option()] = "cpu",
+):
+    if not multipliers:
+        multipliers = t.linspace(-30, 30, steps=21).tolist()
+    utils.set_seed(seed)
+    model = LanguageModel(model_id, device_map=device, dispatch=True)
 
+    already_increased = set()
 
-def next_version(path: Path) -> tuple[int, Path]:
-    previous_version = (
-        0 if not (path / ".version").exists() else current_version(path)[0]
-    )
-    version = previous_version + 1
-    with open(path / ".version", "w") as f:
-        f.write(str(version))
-    dir = path / f"v{version}"
-    dir.mkdir(parents=True, exist_ok=True)
-    return version, dir
+    for dataset_name in datasets:
+        if "openwebtext" in dataset_name:
+            vector_dataset_name, dataset_definition = dataset_name.split("+")
+            _, limit, prompt_len = dataset_definition.split("-")
+
+            dataset = DictDataset.from_openwebtext(
+                int(limit), int(prompt_len), model.tokenizer
+            )
+
+            vectors_version, vectors_dir = utils.current_version(
+                Path(data_dir) / vector_dataset_name / "vectors"
+            )
+            vectors = [
+                SteeringVector.load(path, device) for path in (vectors_dir).iterdir()
+            ]
+            print(
+                f"Loading {limit} items in OWT and {vector_dataset_name} vectors v{vectors_version}..."
+            )
+        else:
+            dataset_version, dataset_dir = utils.current_version(
+                Path(data_dir) / dataset_name / "dataset"
+            )
+
+            vectors_version, vectors_dir = utils.current_version(
+                Path(data_dir) / dataset_name / "vectors"
+            )
+            vectors = [
+                SteeringVector.load(path, device) for path in (vectors_dir).iterdir()
+            ]
+            print(
+                f"Loading {dataset_name} v{dataset_version} and vectors v{vectors_version}..."
+            )
+
+            dataset = Dataset.load(dataset_dir / "test.json").as_single_items()
+
+        losses = compute_spliced_llm_loss(model, dataset, vectors, multipliers)
+
+        if "openwebtext" in dataset_name:
+            if vector_dataset_name in already_increased:
+                scores_version, scores_dir = utils.current_version(
+                    Path(data_dir) / vector_dataset_name / "scores"
+                )
+                already_increased.add(vector_dataset_name)
+            else:
+                scores_version, scores_dir = utils.next_version(
+                    Path(data_dir) / vector_dataset_name / "scores"
+                )
+            filename = dataset_definition.replace("-", "_")
+        else:
+            if dataset_name in already_increased:
+                scores_version, scores_dir = utils.current_version(
+                    Path(data_dir) / dataset_name / "scores"
+                )
+                already_increased.add(dataset_name)
+            else:
+                scores_version, scores_dir = utils.next_version(
+                    Path(data_dir) / dataset_name / "scores"
+                )
+            filename = "test"
+
+        losses.write_csv(scores_dir / f"{filename}.csv")
+        print(f"Saved scores as v{scores_version}...")
 
 
 @app.command()
@@ -44,14 +109,14 @@ def generate_vectors(
     utils.set_seed(seed)
     model = LanguageModel(model_id, device_map=device, dispatch=True)
     for dataset_name in datasets:
-        dataset_version, dataset_dir = current_version(
+        dataset_version, dataset_dir = utils.current_version(
             Path(data_dir) / dataset_name / "dataset"
         )
         print(
             f"Generating vectors for v{dataset_version} of the {dataset_name} dataset..."
         )
 
-        vector_version, vector_dir = next_version(
+        vector_version, vector_dir = utils.next_version(
             Path(data_dir) / dataset_name / "vectors"
         )
         dataset_name = Dataset.load(dataset_dir / "generate.json").as_prefixed_pairs()
@@ -75,7 +140,7 @@ def create_dataset(
         task_loading = progress.add_task("Creating datasets...", total=task_n)
         for name in datasets:
             load_dir = Path(data_dir) / name / "dataset" / "source"
-            version, save_dir = next_version(Path(data_dir) / name / "dataset")
+            version, save_dir = utils.next_version(Path(data_dir) / name / "dataset")
             print(f"Creating dataset v{version} for {name}...")
             if kind == "rimsky":
                 for set in ["generate", "test"]:

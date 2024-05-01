@@ -1,4 +1,5 @@
 # %%
+import importlib
 import re
 from pathlib import Path
 
@@ -10,8 +11,10 @@ from polars import col as c
 from rich import print as rprint
 from rich.progress import Progress
 from rich.table import Table
-from sv.datasets import Dataset
+from sv import plots, utils
 from sv.vectors import SteeringVector
+
+importlib.reload(plots)
 
 
 def set_seed(seed: int) -> None:
@@ -34,20 +37,24 @@ def set_seed(seed: int) -> None:
 
 set_seed(42)
 
-# %%
-model = LanguageModel("openai-community/gpt2", device_map="cuda", dispatch=True)
+model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 
-DATASET = "weddings_simple"
+DATASET = "gender"
 
 dataset_dir = Path("../data") / DATASET
-dataset = Dataset.load(dataset_dir / "test.json")
-data = pl.read_csv(
-    dataset_dir / "probs" / "test.csv",
-    dtypes={"intervention_layer": pl.Int32, "intervention_coeff": pl.Float64},
-)
+_, scores_dir = utils.current_version(dataset_dir / "scores")
+data = pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")])
 
-plot_dir = dataset_dir / "plots"
-plot_dir.mkdir(exist_ok=True, parents=True)
+plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
+# %%
+fig = plots.loss_change_per_layer(data)
+fig.write_image(plots_dir / "loss_change_per_layer.pdf")
+fig.show()
+
+# %%
+fig = plots.loss_difference_per_layer(data)
+fig.write_image(plots_dir / "loss_difference_per_layer.pdf")
+fig.show()
 
 # %%
 sentence_stubs = [
@@ -148,9 +155,8 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     )
 
     for layer in range(12):
-        sv = SteeringVector.load(
-            dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
-        )
+        _, vector_dir = utils.current_version(dataset_dir / "vectors")
+        sv = SteeringVector.load(vector_dir / f"layer_{layer}.pt", device="cpu")
         with model.generate(
             max_new_tokens=1,
             scan=False,
@@ -199,239 +205,6 @@ def generate_freeform(prompt, coeff, layer):
 
 
 generate_freeform("Between a doll and a toy gun, I prefer the", 8, 8)
-
-
-# %%
-def distributions(data: pl.DataFrame):
-    baseline = (
-        data.filter(c("intervention_layer").is_null())
-        .with_columns(c("intervention_layer").fill_null(-1))
-        .with_row_index()
-        .drop("intervention_coeff")
-    )
-    n = len(baseline)
-    coeffs = data["intervention_coeff"].unique().sort().to_list()
-    coeff_df = pl.DataFrame(
-        {"intervention_coeff": coeffs * n, "index": list(range(n)) * len(coeffs)},
-        schema_overrides={"index": pl.UInt32},
-    )
-    baseline = baseline.join(coeff_df, on="index", how="left").drop("index")
-    data = data.filter(c("intervention_layer").is_in([2, 5, 9]))
-
-    return px.histogram(
-        pl.concat([baseline, data])
-        .sort("measured_token", "intervention_coeff", "intervention_layer")
-        .to_pandas(),
-        x="measured_prob",
-        color="measured_token",
-        animation_frame="intervention_coeff",
-        facet_col="intervention_layer",
-        # facet_row="ordering",
-        histnorm="percent",
-        nbins=30,
-        barmode="overlay",
-        range_x=[0, 1],
-        range_y=[0, 25],
-        marginal="box",
-        labels={
-            "measured_prob": "P(token)",
-            "intervention_layer": "Layer",
-            "intervention_coeff": "Steering vector multiplier",
-        },
-    )
-
-
-fig = distributions(data)
-fig.write_image(plot_dir / "distributions.pdf")
-fig.show()
-
-
-# %%
-def delta_per_layer(data: pl.DataFrame):
-    baselines = data.filter(c("intervention_layer").is_null()).select(
-        "q_num", "ordering", "measured_token", c("measured_prob").alias("prob_baseline")
-    )
-
-    deltas = (
-        data.join(baselines, on=["q_num", "ordering", "measured_token"])
-        .with_columns((c("measured_prob") - c("prob_baseline")).alias("delta"))
-        .group_by(
-            "intervention_layer", "intervention_coeff", "ordering", "measured_token"
-        )
-        .agg(c("delta").median().alias("delta_median"))
-        .sort("intervention_coeff", "intervention_layer", "measured_token", "ordering")
-    )
-
-    return px.line(
-        deltas.to_pandas(),
-        x="intervention_layer",
-        y="delta_median",
-        color="intervention_coeff",
-        facet_col="measured_token",
-        facet_row="ordering",
-        render_mode="svg",
-        markers=True,
-        # color_discrete_sequence=px.colors.sequential.RdBu_r,
-        labels={
-            "delta_median": "Median of ∆P(measured token)",
-            "intervention_layer": "Layer with intervention",
-            "intervention_coeff": "Steering vector multiplier",
-        },
-    )
-
-
-fig = delta_per_layer(data)
-# fig.write_image(plot_dir / "delta_per_layer.pdf")
-fig.show()
-
-
-# %%
-def loss_delta_per_coeff(data: pl.DataFrame):
-    baselines = (
-        data.filter(c("intervention_coeff") == 0)
-        .select(
-            "q_num",
-            "measured_token",
-            c("measured_prob").alias("prob_baseline"),
-        )
-        .unique()
-    )
-
-    deltas = data.join(baselines, on=["q_num", "measured_token"]).with_columns(
-        (c("measured_prob") - c("prob_baseline")).alias("delta")
-    )
-
-    pos_probs = deltas.filter(c("measured_token") == "pos")
-    neg_probs = deltas.filter(c("measured_token") == "neg")
-
-    result = (
-        pos_probs.join(
-            neg_probs,
-            on=["q_num", "intervention_layer", "intervention_coeff", "ordering"],
-            suffix="_neg",
-        )
-        .group_by("intervention_layer", "intervention_coeff", "measured_token")
-        .agg((c("delta") - c("delta_neg")).median().alias("delta_median"))
-        .sort("intervention_coeff", "intervention_layer", "measured_token")
-    )
-
-    myscale = px.colors.sample_colorscale(
-        colorscale=px.colors.sequential.RdBu_r,
-        samplepoints=len(deltas["intervention_coeff"].unique()),
-        low=0.0,
-        high=1.0,
-        colortype="rgb",
-    )
-
-    return px.line(
-        result.to_pandas(),
-        x="intervention_layer",
-        y="delta_median",
-        color="intervention_coeff",
-        markers=True,
-        labels={
-            "delta_median": "Median ∆Perplexity(completion)",
-            "intervention_coeff": "Steering vector multiplier",
-            "measured_token": "Completion",
-        },
-        facet_row="measured_token",
-        color_discrete_sequence=myscale,
-        title="Effect of steering multiplier on loss(response) per layer",
-    )
-
-
-fig = loss_delta_per_coeff(data)
-# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
-fig.show()
-
-
-# %%
-def loss_delta_per_coeff(data: pl.DataFrame):
-    pos_probs = data.filter(c("measured_token") == "pos")
-    neg_probs = data.filter(c("measured_token") == "neg")
-
-    deltas = (
-        pos_probs.join(
-            neg_probs,
-            on=["q_num", "intervention_layer", "intervention_coeff", "ordering"],
-            suffix="_neg",
-        )
-        .with_columns(delta=c("measured_prob") - c("measured_prob_neg"))
-        .group_by("intervention_layer", "intervention_coeff")
-        .agg(c("delta").median().alias("delta_median"))
-        .with_columns(positive=c("delta_median") > 0)
-        .sort("intervention_coeff", "intervention_layer")
-        .filter(c("intervention_coeff").abs() < 22)
-    )
-
-    return px.line(
-        deltas.to_pandas(),
-        x="intervention_coeff",
-        y="delta_median",
-        color="positive",
-        markers=True,
-        labels={
-            "delta_median": "Median of per(pos) – loss(neg)",
-            "intervention_coeff": "Steering vector multiplier",
-        },
-        facet_row="intervention_layer",
-        title=f"Effect of steering multiplier on loss(response) per layer",
-        height=3200,
-    )
-
-
-fig = loss_delta_per_coeff(data)
-fig = fig.update_yaxes(matches=None)
-# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
-fig.show()
-
-
-# %%
-def loss_delta_per_coeff(data: pl.DataFrame):
-    pos_probs = data.filter(c("measured_token") == "pos")
-    neg_probs = data.filter(c("measured_token") == "neg")
-
-    deltas = (
-        pos_probs.join(
-            neg_probs,
-            on=["q_num", "intervention_layer", "intervention_coeff", "ordering"],
-            suffix="_neg",
-        )
-        .with_columns(delta=c("measured_prob").log() - c("measured_prob_neg").log())
-        .group_by("intervention_layer", "intervention_coeff")
-        .agg(c("delta").mean().alias("delta_median"))
-        .with_columns(positive=c("delta_median") > 0)
-        .sort("intervention_layer", "intervention_coeff")
-        # .filter(c("intervention_layer") < 10)
-    )
-
-    myscale = px.colors.sample_colorscale(
-        colorscale=px.colors.sequential.RdBu_r,
-        samplepoints=len(deltas["intervention_coeff"].unique()),
-        low=0.0,
-        high=1.0,
-        colortype="rgb",
-    )
-
-    return px.line(
-        deltas.to_pandas(),
-        x="intervention_layer",
-        y="delta_median",
-        color="intervention_coeff",
-        markers=True,
-        labels={
-            "delta_median": "Median ∆LogPerplexity",
-            "intervention_coeff": "Steering vector multiplier",
-        },
-        color_discrete_sequence=myscale,
-        title="Effect of steering multiplier on loss(response) per layer",
-    )
-
-
-fig = loss_delta_per_coeff(data)
-fig = fig.update_yaxes(matches=None)
-# fig.write_image(plot_dir / "loss_delta_per_coeff.pdf")
-fig.show()
 
 
 # %%
@@ -506,10 +279,10 @@ def p_successful_rollout(
                 )
                 rollouts.append(
                     {
-                        "intervention_layer": layer,
+                        "layer": layer,
                         "p_success": sum(has_keyword(d, keywords) for d in decoded)
                         / batch_size,
-                        "intervention_coeff": coeff,
+                        "multiplier": coeff,
                     }
                 )
                 progress.update(task, advance=1)
@@ -529,168 +302,23 @@ def p_successful_rollout(
 rollouts, fig = p_successful_rollout(model, "I think you're", batch_size=200)
 fig.show()
 
-# %%
-fig.write_image(plot_dir / "p_success_per_layer_and_coeff.pdf")
-
-# %%
-
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-
-openweb = load_dataset("Skylion007/openwebtext", streaming=True)
-
-# %%
-
-import einops
-
-
-def perplexity(model, prompts, sv, coeff):
-    criterion = t.nn.CrossEntropyLoss(reduction="none").to(model.device)
-    tokens = model.tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True
-    ).input_ids
-
-    with t.no_grad(), model.trace(tokens, scan=False, validate=False) as _:
-        if sv and coeff != 0:
-            h = model.transformer.h[sv.layer].output[0]
-            h[:, :128] += coeff * sv.vector
-        logits = model.output.logits
-        logits = einops.rearrange(logits, "b s tok -> b tok s").save()
-
-    tokens = tokens.to(logits.device)
-    losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
-
-    return losses[:, 128:].mean(-1).tolist()
-
-
-def compute_perplexity(model, dataset, batch_size=8, items=8):
-    loader = DataLoader(dataset["train"].with_format("torch"), batch_size=batch_size)
-    results = []
-    for i, item in enumerate(loader):
-        if i >= items:
-            break
-
-        tokens = model.tokenizer(
-            item["text"], return_tensors="pt", truncation=True, padding=True
-        ).input_ids
-
-        baseline_pps = compute_mean_perplexity(gpt, tokens)
-        results.extend(
-            [
-                {
-                    "document": doc,
-                    "measured_prob": float(baseline_p),
-                    "intervention_layer": None,
-                    "intervention_coeff": 0,
-                }
-                for doc, baseline_p in enumerate(baseline_pps)
-            ]
-        )
-        for layer in [10]:
-            sv = SteeringVector.load(
-                dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
-            )
-            for coeff in [2, 4, 6, 8, 10, 12, 16, 20]:
-                pps = perplexity(model, item["text"], sv, coeff)
-                results.extend(
-                    [
-                        {
-                            "document": doc,
-                            "measured_prob": float(p),
-                            "intervention_layer": sv.layer,
-                            "intervention_coeff": coeff,
-                        }
-                        for doc, p in enumerate(pps)
-                    ]
-                )
-    return pl.DataFrame(results)
-
-
-df = compute_perplexity(model, openweb)
-
-# %%
-import torch
-from transformers import AutoModelForCausalLM
-
-
-def compute_mean_perplexity(model, batch):
-    # Ensure model is in evaluation mode
-    model.eval()
-
-    # Compute the model's output
-    with torch.no_grad():
-        outputs = model(batch)
-        logits = outputs.logits
-
-    # Compute the loss at the token level
-    loss_fct = t.nn.CrossEntropyLoss(reduction="none")
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = batch[..., 1:].contiguous()
-    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-
-    # Reshape the loss back to the original shape
-    loss = loss.view_as(shift_labels)
-
-    # Ignore the first 128 tokens for the perplexity computation
-    loss = loss[:, 128:]
-
-    # Compute the perplexity of the sequence
-    perplexity = torch.exp(loss)
-
-    # Compute and return the mean perplexity
-    return loss.mean(-1).tolist()
-
-
-gpt = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
-
-# item = next(openweb["train"].__iter__())
-tokens = model.tokenizer(item["text"], return_tensors="pt", truncation=True).input_ids
-
-perp = compute_mean_perplexity(gpt, tokens)
-perp
-
-# %%
-
-
-def perplexity(model, prompts, sv, coeff):
-    criterion = t.nn.CrossEntropyLoss(reduction="none").to(model.device)
-    tokens = model.tokenizer(
-        prompts, return_tensors="pt", padding=True, truncation=True
-    ).input_ids
-
-    with t.no_grad(), model.trace(tokens, scan=False, validate=False) as _:
-        # if sv and coeff != 0:
-        #     h = model.transformer.h[sv.layer].output[0]
-        #     h[is_prefix] += coeff * sv.vector
-        logits = model.output.logits
-        logits = einops.rearrange(logits, "b s tok -> b tok s").save()
-
-    tokens = tokens.to(logits.device)
-    losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
-
-    return losses[:, 128:].exp().mean(-1).tolist()
-
-
-perplexity(model, item["text"], None, 0)
 
 # %%
 
 layer = 10
 
-baseline_perplexity = df.filter(c("intervention_layer").is_null())[
-    "measured_prob"
-].median()
+baseline_perplexity = df.filter(c("layer").is_null())["loss"].median()
 baseline_p_success = (
-    rollouts.filter(c("intervention_coeff") == 0)
-    .filter(c("intervention_layer") == layer)["p_success"]
+    rollouts.filter(c("multiplier") == 0)
+    .filter(c("layer") == layer)["p_success"]
     .median()
 )
 
 pareto = (
-    df.group_by("intervention_layer", "intervention_coeff")
-    .agg(c("measured_prob").median().alias("mean_perplexity"))
-    .join(rollouts, on=["intervention_layer", "intervention_coeff"])
-    .filter(c("intervention_layer") == layer)
+    df.group_by("layer", "multiplier")
+    .agg(c("loss").median().alias("mean_perplexity"))
+    .join(rollouts, on=["layer", "multiplier"])
+    .filter(c("layer") == layer)
     .sort("mean_perplexity", "p_success")
 )
 
@@ -698,10 +326,10 @@ fig = px.line(
     pareto.to_pandas(),
     x="mean_perplexity",
     y="p_success",
-    labels={"intervention_layer": "Layer"},
+    labels={"layer": "Layer"},
     markers=True,
     title=f"Pareto front for layer {layer}",
-    custom_data=["intervention_coeff"],
+    custom_data=["multiplier"],
 )
 # fig.update_yaxes(matches=None)
 # fig.update_xaxes(matches=None)

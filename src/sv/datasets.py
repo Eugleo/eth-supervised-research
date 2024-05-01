@@ -3,9 +3,11 @@ import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, TypedDict
+from typing import List
 
 import torch.utils.data as td
+from datasets import load_dataset
+from transformers import PreTrainedTokenizer
 
 
 class DictDataset(td.Dataset):
@@ -18,13 +20,36 @@ class DictDataset(td.Dataset):
         return len(self._prompts)
 
     def __getitem__(self, idx: int) -> dict:
-        return {"index": idx} | self._prompts[idx]
+        return self._prompts[idx]
 
-
-class RimskyItem(TypedDict):
-    question: str
-    answer_matching_behavior: str
-    answer_not_matching_behavior: str
+    @staticmethod
+    def from_openwebtext(
+        limit: int, prompt_len: int, tokenizer: PreTrainedTokenizer
+    ) -> "DictDataset":
+        dataset = load_dataset(
+            "Skylion007/openwebtext", streaming=True, trust_remote_code=True
+        )["train"]  # type: ignore
+        items = []
+        for i, item in enumerate(dataset):
+            assert isinstance(item, dict)
+            if i >= limit:
+                break
+            tokens = tokenizer(
+                item["text"], return_tensors="pt", truncation=True
+            ).input_ids
+            prompt = tokenizer.batch_decode(tokens[:, :prompt_len])[0].strip()
+            completion = tokenizer.batch_decode(
+                tokens[:, prompt_len : tokenizer.model_max_length - 1]
+            )[0].strip()
+            items.append(
+                {
+                    "index": i,
+                    "prompt": prompt,
+                    "completion": completion,
+                    "origin": f"openwebtext-{limit}-{prompt_len }",
+                }
+            )
+        return DictDataset(items)
 
 
 @dataclass
@@ -44,7 +69,7 @@ class Item:
         return Item(question=data["question"], pos=data["pos"], neg=data["neg"])
 
     @staticmethod
-    def from_rimsky_item(rimsky_item: RimskyItem, matching=None) -> "Item":
+    def from_rimsky_item(rimsky_item: dict, matching=None) -> "Item":
         match = re.match(
             r"(.+?)(?:Choices:)?\s+\(A\)(.+)\s+\(B\)(.+)",
             rimsky_item["question"],
@@ -85,10 +110,23 @@ class Dataset:
         dataset = DictDataset(pairs)
         return dataset
 
-    def as_triplets(self) -> DictDataset:
+    def as_single_items(self) -> DictDataset:
         prompts = [
-            {"prompt": item.question, "pos": item.pos, "neg": item.neg}
-            for item in self._items
+            {
+                "index": i,
+                "prompt": item.question,
+                "completion": item.pos,
+                "origin": "pos",
+            }
+            for i, item in enumerate(self._items)
+        ] + [
+            {
+                "index": i,
+                "prompt": item.question,
+                "completion": item.neg,
+                "origin": "neg",
+            }
+            for i, item in enumerate(self._items)
         ]
         dataset = DictDataset(prompts)
         return dataset
