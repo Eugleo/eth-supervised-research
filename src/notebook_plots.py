@@ -39,11 +39,13 @@ set_seed(42)
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 
-DATASET = "gender"
+DATASET = "weddings"
 
 dataset_dir = Path("../data") / DATASET
 _, scores_dir = utils.current_version(dataset_dir / "scores")
-data = pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")])
+data = pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")]).filter(
+    c("loss").is_not_nan()
+)
 
 plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
 # %%
@@ -178,8 +180,8 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     rprint(table)
 
 
-for coeff in [1]:
-    generate_text(sentence_stubs[10:], coeff, func=gender_prompt)
+for coeff in [2]:
+    generate_text(wedding_stubs[10:], coeff, func=wedding_prompt)
 
 
 # %%

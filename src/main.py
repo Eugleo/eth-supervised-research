@@ -28,7 +28,30 @@ def compute_loss(
     device: Annotated[str, Option()] = "cpu",
 ):
     if not multipliers:
-        multipliers = t.linspace(-30, 30, steps=21).tolist()
+        multipliers = [
+            -40,
+            -30,
+            -20,
+            -15,
+            -10,
+            -8,
+            -6,
+            -4,
+            -2,
+            -1,
+            -0.5,
+            0.5,
+            1,
+            2,
+            4,
+            6,
+            8,
+            10,
+            15,
+            20,
+            30,
+            40,
+        ]
     utils.set_seed(seed)
     model = LanguageModel(model_id, device_map=device, dispatch=True)
 
@@ -69,7 +92,12 @@ def compute_loss(
 
             dataset = Dataset.load(dataset_dir / "test.json").as_single_items()
 
-        losses = compute_spliced_llm_loss(model, dataset, vectors, multipliers)
+        batch_size = 1
+        if device == "cuda":
+            batch_size = 64 if "openwebtext" not in dataset_name else 16
+        losses = compute_spliced_llm_loss(
+            model, dataset, vectors, multipliers, batch_size
+        )
 
         if "openwebtext" in dataset_name:
             if vector_dataset_name in already_increased:

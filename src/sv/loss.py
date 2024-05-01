@@ -39,6 +39,11 @@ def _spliced_llm_loss_on_batch(
     per_token_losses[is_prompt[:, :-1]] = t.nan
     per_sequence_losses = per_token_losses.nanmean(-1).tolist()
 
+    if t.nan in per_sequence_losses:
+        print(per_token_losses)
+        print(per_sequence_losses)
+        raise ValueError("NaN loss detected")
+
     return [
         {
             "index": index,
@@ -59,8 +64,8 @@ def compute_spliced_llm_loss(
     dataset: Dataset,
     steering_vectors: List[SteeringVector],
     multipliers: List[float],
+    batch_size: int,
 ):
-    batch_size = 1 if model.device == t.device("cpu") else 64
     loader = DataLoader(dataset, batch_size=batch_size)
 
     results = []

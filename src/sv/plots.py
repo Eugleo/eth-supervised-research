@@ -45,6 +45,7 @@ def loss_change_per_layer(data: pl.DataFrame):
             "origin": "Dataset kind",
         },
         height=300 * len(deltas["origin"].unique()),
+        render_mode="svg",
     )
 
 
@@ -73,4 +74,5 @@ def loss_difference_per_layer(data: pl.DataFrame):
             "multiplier": "Vector multiplier",
         },
         color_discrete_sequence=scale,
+        render_mode="svg",
     )
