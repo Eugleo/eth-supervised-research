@@ -17,7 +17,7 @@ W_dec_all_layers = torch.stack(
 )
 
 #Load response data
-data_path = "data/gender/dataset/v1/generate.json"
+data_path = "data/weddings_hard/dataset/v1/generate.json"
 dataset = Dataset.load(data_path)
 pairs = dataset.as_prefixed_pairs()
 
@@ -28,8 +28,8 @@ for layer in tqdm(range(12)):
 
     layer_deltas = Layer_Deltas(pairs, model, encoder, hook_point, device="cpu")
     
-    plot_path = "data/gender/plots/feature_deltas/feature_deltas_layer_" + str(layer) + ".png"
-    dashboard_path = "data/gender/sae_visualisation"
+    plot_path = "data/weddings_hard/plots/feature_deltas/feature_deltas_layer_" + str(layer) + ".png"
+    dashboard_path = "data/weddings_hard/sae_visualisation"
 
     layer_deltas.plot_activation_deltas(plot_path, show=False)
     layer_deltas.save_dashboard(layer, dashboard_path)
