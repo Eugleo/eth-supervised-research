@@ -17,18 +17,18 @@ W_dec_all_layers = torch.stack(
 )
 
 #Load response data
-data_path = "data/weddings_hard/dataset/v1/generate.json"
+data_path = "data/gender/dataset/v1/generate.json"
 dataset = Dataset.load(data_path)
 pairs = dataset.as_prefixed_pairs()
 
 #Cycle through each layer and construct sae visualisation data and deltas
-for layer in range(8,12):
+for layer in range(7,12):
     print("Layer: ", layer)
     hook_point = f"blocks.{layer}.hook_resid_pre"
     encoder = gpt2_small_sparse_autoencoders[hook_point].to("cpu")
     
-    plot_path = "data/weddings_hard/plots/feature_deltas/full_feature_deltas_layer_" + str(layer) + ".png"
-    dashboard_path = "data/weddings_hard/sae_visualisation"
+    plot_path = "data/gender/plots/feature_deltas/full_feature_deltas_layer_" + str(layer) + ".png"
+    dashboard_path = "data/gender/sae_visualisation"
 
     layer_deltas = Layer_Deltas(pairs, model, encoder, hook_point, device="cpu",plot_path=plot_path)
     
