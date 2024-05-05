@@ -25,8 +25,9 @@ class Layer_Deltas:
     deltas: list
     hook_point: str
 
-    def __init__(self, pair_responses, model, encoder, hook_point, device, feature_size = 64, batch_size = 32):
+    def __init__(self, pair_responses, model, encoder, hook_point, device, feature_size = 24576, batch_size = 32, plot_path = None):
         
+        self.device = device
         pos_tokens, neg_tokens = self.tokenize_behaviour_sets(pair_responses, model)
         #Move tokens to device
         pos_tokens = pos_tokens.to(device)
@@ -34,7 +35,7 @@ class Layer_Deltas:
 
         model.to(device)
 
-        cfg = self.construct_sae_vis_config(hook_point, feature_size, batch_size, verbose=False)
+        cfg = self.construct_sae_vis_config(hook_point, range(feature_size), batch_size, verbose=True)
 
 
         sae_data_prior = self.construct_sae_vis_data(encoder, model, pos_tokens, cfg)
@@ -46,6 +47,21 @@ class Layer_Deltas:
         self.sae_data = sae_data_prior, sae_data_post
 
         self.deltas = self.construct_activation_deltas(sae_data_prior, sae_data_post)
+        self.plot_activation_deltas(plot_path, show=False)
+
+        #Get indices of top 50 features
+        top_50 = np.argsort(np.abs(self.deltas))[-50:]
+
+        #Re run the analysis with the top 50 features
+        cfg = self.construct_sae_vis_config(hook_point, top_50, batch_size, verbose=True)
+
+        sae_data_prior = self.construct_sae_vis_data(encoder, model, pos_tokens, cfg)
+        sae_data_post = self.construct_sae_vis_data(encoder, model, neg_tokens, cfg)
+
+        self.sae_data = sae_data_prior, sae_data_post
+        
+        self.deltas = self.construct_activation_deltas(sae_data_prior, sae_data_post, features = top_50)
+
 
 
 
@@ -70,12 +86,12 @@ class Layer_Deltas:
     
         return all_tokens_pos, all_tokens_neg
 
-    def construct_sae_vis_config(self,hook_point, feature_size, batch_size, verbose=False):
+    def construct_sae_vis_config(self,hook_point, features, batch_size, verbose=False):
         
         # Construct the SaeVisConfig object
         config = SaeVisConfig(
             hook_point=hook_point,
-            features=range(feature_size),
+            features=features,
             batch_size=batch_size,
             verbose=verbose
         )
@@ -85,7 +101,7 @@ class Layer_Deltas:
     def construct_sae_vis_data(self,encoder, model, tokens, config):
         # Construct the SaeVisData object
         data = SaeVisData.create(
-            encoder=encoder,
+            encoder=encoder.to(self.device),
             model=model,
             tokens=tokens,
             cfg=config
@@ -93,19 +109,20 @@ class Layer_Deltas:
 
         return data
 
-    def construct_activation_deltas(self,sae_vis_data_prior, sae_vis_data_post):
+    def construct_activation_deltas(self,sae_vis_data_prior, sae_vis_data_post,features=None):
 
         feature_data_prior = sae_vis_data_prior.feature_data_dict
         feature_data_post = sae_vis_data_post.feature_data_dict
         assert len(feature_data_prior) == len(feature_data_post) #Same feature data lengths recorder
 
         num_features = len(feature_data_prior)
+        range_to_use = range(num_features) if features is None else features
 
         max_activation_deltas = []
         max_activation_deltas_normalised = []
 
 
-        for idx in range(num_features):
+        for idx in range_to_use:
             prior_hist = feature_data_prior[idx].acts_histogram_data
             post_hist = feature_data_post[idx].acts_histogram_data
 
@@ -173,7 +190,7 @@ class Layer_Deltas:
 class Feature_Deltas:
     layer_deltas: list[Layer_Deltas]
 
-    def __init__(self, pair_responses, model, encoders, hook_points, device, feature_size = 64, batch_size = 32):
+    def __init__(self, pair_responses, model, encoders, hook_points, device, feature_size = 24576, batch_size = 32):
         self.layer_deltas = []
         pbar = tqdm(total = len(encoders))
         for layer, encoder, hook_point in zip(range(len(encoders)), encoders, hook_points):
