@@ -29,7 +29,7 @@ def spliced_llm_loss(
         logits = einops.rearrange(model.output.logits, "b s tok -> b tok s").save()
 
     per_token_losses = cross_entropy(logits.value[:, :, :-1], tokens[:, 1:])
-    per_token_losses[is_prompt[:, :-1]] = t.nan
+    per_token_losses = t.where(is_prompt[:, :-1].bool(), t.nan, per_token_losses)
     losses = per_token_losses.nanmean(-1)
 
     return losses
