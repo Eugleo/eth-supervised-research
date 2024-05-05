@@ -10,6 +10,30 @@ from torch.utils.data import DataLoader, Dataset
 
 from sv.vectors import SteeringVector
 
+cross_entropy = t.nn.CrossEntropyLoss(reduction="none")
+
+
+def spliced_llm_loss(
+    model: LanguageModel,
+    batch: dict,
+    vector: SteeringVector,
+):
+    assert isinstance(model.device, t.device)
+    cross_entropy.to(model.device)
+
+    tokens = batch["input_ids"]
+    is_prompt = batch["prompt_mask"]
+    with model.trace(tokens, scan=False, validate=False) as _:  # type: ignore
+        h = model.transformer.h[vector.layer].output[0]
+        h[is_prompt] += vector.vector
+        logits = einops.rearrange(model.output.logits, "b s tok -> b tok s").save()
+
+    per_token_losses = cross_entropy(logits.value[:, :, :-1], tokens[:, 1:])
+    per_token_losses[is_prompt[:, :-1]] = t.nan
+    losses = per_token_losses.nanmean(-1)
+
+    return losses
+
 
 def _spliced_llm_loss_on_batch(
     model,
@@ -38,11 +62,6 @@ def _spliced_llm_loss_on_batch(
     per_token_losses = criterion(logits.value[:, :, :-1], tokens[:, 1:])
     per_token_losses[is_prompt[:, :-1]] = t.nan
     per_sequence_losses = per_token_losses.nanmean(-1).tolist()
-
-    if t.nan in per_sequence_losses:
-        print(per_token_losses)
-        print(per_sequence_losses)
-        raise ValueError("NaN loss detected")
 
     return [
         {
