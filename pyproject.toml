@@ -19,6 +19,7 @@ dependencies = [
     "torch==2.2.2",
     "transformers",
     "typer",
+    "wandb",
 ]
 
 [project.scripts]
