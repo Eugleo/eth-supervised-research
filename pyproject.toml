@@ -28,6 +28,8 @@ sv = "main:app"
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+ignore = ["F821", "F722"]
