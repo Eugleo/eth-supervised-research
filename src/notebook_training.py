@@ -42,10 +42,6 @@ sae_layer = vector_layer + 1
 device = t.device("cpu")
 
 # %%
-gpt2 = transformer_lens.HookedTransformer.from_pretrained("gpt2-small")
-gpt2.to(device)
-gpt2.reset_hooks()
-
 autoencoder = SparseAutoencoder.from_pretrained(
     "gpt2-small-res-jb", f"blocks.{sae_layer}.hook_resid_pre"
 )
@@ -74,7 +70,7 @@ import torch.nn.functional as F
 import wandb
 from datasets import load_dataset
 from nnsight import LanguageModel
-from rich.progress import track
+from rich.progress import Progress
 from sv.datasets import Dataset, DictDataset
 from sv.loss import spliced_llm_loss
 from torch.utils.data import DataLoader
@@ -87,7 +83,7 @@ tokenizer = model.tokenizer
 
 _, dataset_dir = utils.current_version(Path("../data") / dataset / "dataset")
 pos_train, neg_train = Dataset.load(dataset_dir / "generate.json").as_single_items()
-pos_eval, train_eval = Dataset.load(dataset_dir / "test.json").as_single_items()
+pos_eval, neg_eval = Dataset.load(dataset_dir / "test.json").as_single_items()
 
 
 def collate_fn(examples):
@@ -108,14 +104,10 @@ def collate_fn(examples):
 
 batch_size = 16
 
-pos_train_loader = DataLoader(
-    pos_train, collate_fn=collate_fn, batch_size=batch_size, shuffle=True
-)
-neg_train_loader = DataLoader(
-    neg_train, collate_fn=collate_fn, batch_size=batch_size, shuffle=True
-)
+pos_train_loader = DataLoader(pos_train, collate_fn=collate_fn, batch_size=batch_size)
+neg_train_loader = DataLoader(neg_train, collate_fn=collate_fn, batch_size=batch_size)
 pos_eval_loader = DataLoader(pos_eval, collate_fn=collate_fn, batch_size=batch_size)
-neg_eval_loader = DataLoader(neg_train, collate_fn=collate_fn, batch_size=batch_size)
+neg_eval_loader = DataLoader(neg_eval, collate_fn=collate_fn, batch_size=batch_size)
 
 
 def collate_fn_c4(examples):
@@ -127,13 +119,12 @@ def collate_fn_c4(examples):
     return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
 
 
-c4_data = load_dataset("NeelNanda/c4-10k", split="train[:50%]")
+c4_data = load_dataset("NeelNanda/c4-10k", split="train[:2%]")
 c4_tokenized = tokenize_and_concatenate(c4_data, model.tokenizer, max_length=128)  # type: ignore
 c4_loader = DataLoader(
     c4_tokenized.with_format("torch"),  # type: ignore
     collate_fn=collate_fn_c4,
     batch_size=32,
-    shuffle=True,
 )
 
 for p in model.parameters():
@@ -148,7 +139,7 @@ multipliers = t.nn.Parameter(decomposed_vector.clone().detach())
 orig_vector = SteeringVector(vector_layer, original_vector)
 
 epochs = 10
-lr = 1e-2
+lr = 1e-3
 optimizer = t.optim.Adam([multipliers], lr=lr)
 
 wandb.init(project="eth-supervised-research")
@@ -164,81 +155,109 @@ def eval_step(model, vector, pos_loader, neg_loader=None):
         if neg_loader is not None
         else ((i, None) for i in pos_loader)
     )
-    for pos_batch, neg_batch in track(batches, description="Evaluating..."):
+    for pos_batch, neg_batch in batches:
         pos_loss += spliced_llm_loss(model, pos_batch, vector).sum().item()
         if neg_batch is not None:
             neg_loss += spliced_llm_loss(model, neg_batch, vector).sum().item()
 
-    pos_loss = pos_loss / pos_n if pos_n > 0 else 0
-    neg_loss = neg_loss / (n - pos_n) if n - pos_n > 0 else 0
-    loss = (pos_loss - neg_loss) / n
+    avg_pos_loss = pos_loss / pos_n if pos_n > 0 else 0
+    avg_neg_loss = neg_loss / (n - pos_n) if n - pos_n > 0 else 0
+    avg_loss = (pos_loss - neg_loss) / n
 
-    return pos_loss, neg_loss, loss
+    return avg_pos_loss, avg_neg_loss, avg_loss
 
 
 pareto_loss = []
 
 vectors = []
 
-batches = zip(pos_train_loader, neg_train_loader)
+old_vector = SteeringVector(vector_layer, orig_vector.vector * 2)
+_, _, orig_loss = eval_step(model, old_vector, pos_eval_loader, neg_eval_loader)
+
+new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+pos_loss, neg_loss, loss = eval_step(
+    model, new_vector, pos_eval_loader, neg_eval_loader
+)
+
+_, _, c4_loss = eval_step(model, new_vector, c4_loader)
+
+wandb.log(
+    {
+        "val/loss": loss,
+        "val/pos_loss": pos_loss,
+        "val/neg_loss": neg_loss,
+        "val/improvement": orig_loss - loss,
+        "c4_loss": c4_loss,
+        "n_seen": 0,
+    }
+)
+
 n_seen = 0
-for epoch in range(epochs):
-    for i, (pos_batch, neg_batch) in enumerate(
-        track(batches, description=f"Epoch {epoch + 1}...")
-    ):
-        optimizer.zero_grad()
-        new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-        pos_loss = spliced_llm_loss(model, pos_batch, new_vector).sum()
-        neg_loss = spliced_llm_loss(model, neg_batch, new_vector).sum()
-        loss = pos_loss - neg_loss
-
-        similarity = F.cosine_similarity(new_vector.vector, original_vector, dim=0)
-
-        wandb.log(
-            {
-                "train/pos_loss": pos_loss.item() / batch_size,
-                "train/neg_loss": neg_loss.item() / batch_size,
-                "train/cos_similarity": similarity.item(),
-                "train/loss": loss / batch_size,
-                "n_seen": n_seen,
-            }
+with Progress() as progress:
+    for epoch in range(epochs):
+        train_task = progress.add_task(
+            f"Epoch {epoch + 1}...", total=len(pos_train_loader.dataset)
         )
+        batches = zip(pos_train_loader, neg_train_loader)
+        for i, (pos_batch, neg_batch) in enumerate(batches):
+            optimizer.zero_grad()
+            new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+            pos_loss = spliced_llm_loss(model, pos_batch, new_vector).sum()
+            neg_loss = spliced_llm_loss(model, neg_batch, new_vector).sum()
+            loss = pos_loss - neg_loss
 
-        loss.backward()
-        optimizer.step()
-        n_seen += len(pos_batch["input_ids"]) + len(neg_batch["input_ids"])
+            loss.backward()
+            optimizer.step()
+            n_seen += len(pos_batch["input_ids"]) + len(neg_batch["input_ids"])
+            progress.update(train_task, advance=batch_size)
 
-    with t.no_grad():
-        old_vector = SteeringVector(vector_layer, orig_vector.vector * 2)
-        _, _, orig_loss = eval_step(model, old_vector, pos_eval_loader, neg_eval_loader)
+            similarity = F.cosine_similarity(new_vector.vector, original_vector, dim=0)
 
-        new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-        pos_loss, neg_loss, loss = eval_step(
-            model, new_vector, pos_eval_loader, neg_eval_loader
-        )
-        _, _, c4_loss = eval_step(model, new_vector, c4_loader)
+            wandb.log(
+                {
+                    "train/pos_loss": pos_loss.item() / batch_size,
+                    "train/neg_loss": neg_loss.item() / batch_size,
+                    "train/cos_similarity": similarity.item(),
+                    "train/loss": loss / batch_size,
+                    "n_seen": n_seen,
+                }
+            )
+        progress.stop_task(train_task)
 
-        pareto_loss.append(
-            {
-                "multiplier": multipliers.norm().item(),
-                "c4_loss": c4_loss,
-                "loss": loss,
-                "vector": "learned",
-                "epoch": epoch,
-            }
-        )
-        vectors.append(new_vector.vector.detach())
+        with t.no_grad():
+            eval_task = progress.add_task("Evaluating...", total=2)
 
-        wandb.log(
-            {
-                "val/loss": loss,
-                "val/pos_loss": pos_loss,
-                "val/neg_loss": neg_loss,
-                "val/improvement": orig_loss - loss,
-                "c4_loss": c4_loss,
-                "n_seen": n_seen,
-            }
-        )
+            new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+            pos_loss, neg_loss, loss = eval_step(
+                model, new_vector, pos_eval_loader, neg_eval_loader
+            )
+            progress.update(eval_task, advance=1)
+
+            _, _, c4_loss = eval_step(model, new_vector, c4_loader)
+            progress.update(eval_task, advance=1)
+
+            pareto_loss.append(
+                {
+                    "multiplier": multipliers.norm().item(),
+                    "c4_loss": c4_loss,
+                    "loss": loss,
+                    "vector": "learned",
+                    "epoch": epoch,
+                }
+            )
+            vectors.append(new_vector.vector.detach())
+
+            wandb.log(
+                {
+                    "val/loss": loss,
+                    "val/pos_loss": pos_loss,
+                    "val/neg_loss": neg_loss,
+                    "val/improvement": orig_loss - loss,
+                    "c4_loss": c4_loss,
+                    "n_seen": n_seen,
+                }
+            )
+            progress.stop_task(eval_task)
 
 wandb.finish()
 
