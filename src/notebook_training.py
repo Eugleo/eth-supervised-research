@@ -167,7 +167,11 @@ def eval_step(model, loader, vector):
         pos_loss += losses[is_pos].sum().item()
         neg_loss += losses[~is_pos].sum().item()
 
-    return pos_loss / pos_n, neg_loss / (n - pos_n), (pos_loss - neg_loss) / n
+    pos_loss = pos_loss / pos_n if pos_n > 0 else 0
+    neg_loss = neg_loss / (n - pos_n) if n - pos_n > 0 else 0
+    loss = (pos_loss - neg_loss) / n
+
+    return pos_loss, neg_loss, loss
 
 
 pareto_loss = []
