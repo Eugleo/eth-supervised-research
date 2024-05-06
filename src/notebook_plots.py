@@ -42,28 +42,32 @@ model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 DATASET = "gender"
 
 dataset_dir = Path("../data") / DATASET
-_, scores_dir = utils.current_version(dataset_dir / "scores")
+scores_version, scores_dir = utils.current_version(dataset_dir / "scores")
 data = (
     pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")])
     .filter(c("loss").is_not_nan())
     .sort("layer", "multiplier")
 )
 
-# plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
+plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
 # %%
 fig = plots.loss_change_per_layer(
-    data, "Change of loss after intervention (lower is better)"
+    data,
+    f"Change of loss after intervention (lower is better), scores v{scores_version}",
 )
 fig.write_image(plots_dir / "loss_change_per_layer.pdf")
 fig.show()
 
 # %%
-fig = plots.loss_difference_per_layer(data)
+fig = plots.loss_difference_per_layer(
+    data,
+    title=f"The effectivenes of steering (higher is better), scores v{scores_version}",
+)
 fig.write_image(plots_dir / "loss_difference_per_layer.pdf")
 fig.show()
 
 # %%
-sentence_stubs = [
+gender_stubs = [
     # Male implied
     "He could fix anything, from broken toys to the old family car. That's why his dad always called him his big",
     "Standing tall, even taller than his classmates, he was a natural leader on the basketball court. That's why his dad always called him his big",
@@ -184,37 +188,51 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     rprint(table)
 
 
-for coeff in [1.4]:
-    generate_text(sentence_stubs[10:], coeff, func=gender_prompt)
+for coeff in [0.05]:
+    generate_text(gender_stubs[10:], coeff, func=gender_prompt)
 
 
 # %%
 _, vector_dir = utils.current_version(dataset_dir / "vectors")
 sv = SteeringVector.load(
-    Path("../data/gender/vectors/v2") / f"layer_8.pt", device="cpu"
+    Path("../data/gender/vectors/v1") / f"layer_8.pt", device="cpu"
 )
-sv = SteeringVector(sv.layer, sv.vector * 0.05)
+sv = SteeringVector(sv.layer, sv.vector * 3)
+
+# sv = SteeringVector.load(
+#     Path("../data/gender/vectors/v4") / f"layer_8.pt", device="cpu"
+# )
+# sv = SteeringVector(sv.layer, sv.vector * 0.15)
 
 
-def generate_freeform(prompt, vector):
-    for _ in range(20):
-        with t.no_grad(), model.generate(
-            prompt,
-            scan=False,
-            validate=False,
-            do_sample=True,
-            pad_token_id=model.tokenizer.eos_token_id,
-            top_p=0.8,
-            temperature=1,
-        ) as _:
-            h = model.transformer.h[vector.layer].output[0]
-            h[:] += vector.vector
-            steered_output = model.generator.output.save()
-        prompt = model.tokenizer.batch_decode(steered_output.value)[0]
-    print(prompt)
+def generate_freeform(start_prompt, vector):
+    completions = Table(
+        "Completion",
+        show_lines=True,
+        width=60,
+    )
+    for _ in range(5):
+        prompt = start_prompt
+        for i in range(20):
+            with t.no_grad(), model.generate(
+                prompt,
+                scan=False,
+                validate=False,
+                do_sample=True,
+                pad_token_id=model.tokenizer.eos_token_id,
+                top_p=0.6,
+                temperature=1,
+            ) as _:
+                if i == 0:
+                    h = model.transformer.h[vector.layer].output[0]
+                    h[:] += vector.vector
+                steered_output = model.generator.output.save()
+            prompt = model.tokenizer.batch_decode(steered_output.value)[0]
+        completions.add_row(prompt)
+    rprint(completions)
 
 
-generate_freeform("In the picture we see a", sv)
+generate_freeform("Now more about my family. My", sv)
 
 
 # %%

@@ -49,17 +49,14 @@ autoencoder.to(device)
 
 
 # %%
-def load_vector(dataset, layer) -> jt.Float[t.Tensor, "dim"]:
-    dataset_dir = Path("../data") / dataset
-    _, vector_dir = utils.current_version(dataset_dir / "vectors")
-    return SteeringVector.load(vector_dir / f"layer_{layer}.pt").vector
+def load_vector(layer) -> jt.Float[t.Tensor, "dim"]:
+    return SteeringVector.load(f"../data/gender/vectors/v1/layer_{layer}.pt").vector
 
 
 def decompose_into_features(autoencoder, vector):
     return autoencoder(vector.unsqueeze(0)).feature_acts.squeeze()
 
 
-# %%
 original_vector = load_vector(dataset, vector_layer).to(device)
 decomposed_vector = decompose_into_features(autoencoder, original_vector)
 
@@ -110,23 +107,6 @@ pos_eval_loader = DataLoader(pos_eval, collate_fn=collate_fn, batch_size=batch_s
 neg_eval_loader = DataLoader(neg_eval, collate_fn=collate_fn, batch_size=batch_size)
 
 
-def collate_fn_c4(examples):
-    input_ids = t.stack([x["tokens"] for x in examples])
-    prompt_mask = t.zeros_like(input_ids)
-    prompt_mask[:, :64] = 1
-    pos_mask = t.ones(len(examples)).bool()
-
-    return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
-
-
-c4_data = load_dataset("NeelNanda/c4-10k", split="train[:2%]")
-c4_tokenized = tokenize_and_concatenate(c4_data, model.tokenizer, max_length=128)  # type: ignore
-c4_loader = DataLoader(
-    c4_tokenized.with_format("torch"),  # type: ignore
-    collate_fn=collate_fn_c4,
-    batch_size=32,
-)
-
 for p in model.parameters():
     p.requires_grad = False
 model.eval()
@@ -139,7 +119,7 @@ multipliers = t.nn.Parameter(decomposed_vector.clone().detach())
 orig_vector = SteeringVector(vector_layer, original_vector)
 
 epochs = 10
-lr = 1e-3
+lr = 1e-2
 optimizer = t.optim.Adam([multipliers], lr=lr)
 
 wandb.init(project="eth-supervised-research")
@@ -167,19 +147,18 @@ def eval_step(model, vector, pos_loader, neg_loader=None):
     return avg_pos_loss, avg_neg_loss, avg_loss
 
 
-pareto_loss = []
-
 vectors = []
 
-old_vector = SteeringVector(vector_layer, orig_vector.vector * 2)
+old_vector = SteeringVector(vector_layer, orig_vector.vector * 3)
 _, _, orig_loss = eval_step(model, old_vector, pos_eval_loader, neg_eval_loader)
 
-new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+new_vector = SteeringVector(
+    vector_layer, multipliers @ autoencoder.W_dec + autoencoder.b_dec
+)
 pos_loss, neg_loss, loss = eval_step(
     model, new_vector, pos_eval_loader, neg_eval_loader
 )
 
-_, _, c4_loss = eval_step(model, new_vector, c4_loader)
 
 wandb.log(
     {
@@ -187,7 +166,6 @@ wandb.log(
         "val/pos_loss": pos_loss,
         "val/neg_loss": neg_loss,
         "val/improvement": orig_loss - loss,
-        "c4_loss": c4_loss,
         "n_seen": 0,
     }
 )
@@ -201,10 +179,16 @@ with Progress() as progress:
         batches = zip(pos_train_loader, neg_train_loader)
         for i, (pos_batch, neg_batch) in enumerate(batches):
             optimizer.zero_grad()
-            new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+            new_vector = SteeringVector(
+                vector_layer, multipliers @ autoencoder.W_dec + autoencoder.b_dec
+            )
             pos_loss = spliced_llm_loss(model, pos_batch, new_vector).sum()
             neg_loss = spliced_llm_loss(model, neg_batch, new_vector).sum()
-            loss = pos_loss - neg_loss
+
+            penalty_l2 = ((new_vector.vector - original_vector) ** 2).sum()
+            penalty_l1 = 0.05 * (t.abs(multipliers)).sum()
+
+            loss = pos_loss - neg_loss + 0.01 * penalty_l2
 
             loss.backward()
             optimizer.step()
@@ -225,26 +209,16 @@ with Progress() as progress:
         progress.stop_task(train_task)
 
         with t.no_grad():
-            eval_task = progress.add_task("Evaluating...", total=2)
+            eval_task = progress.add_task("Evaluating...", total=1)
 
-            new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+            new_vector = SteeringVector(
+                vector_layer, multipliers @ autoencoder.W_dec + autoencoder.b_dec
+            )
             pos_loss, neg_loss, loss = eval_step(
                 model, new_vector, pos_eval_loader, neg_eval_loader
             )
             progress.update(eval_task, advance=1)
 
-            _, _, c4_loss = eval_step(model, new_vector, c4_loader)
-            progress.update(eval_task, advance=1)
-
-            pareto_loss.append(
-                {
-                    "multiplier": multipliers.norm().item(),
-                    "c4_loss": c4_loss,
-                    "loss": loss,
-                    "vector": "learned",
-                    "epoch": epoch,
-                }
-            )
             vectors.append(new_vector.vector.detach())
 
             wandb.log(
@@ -253,7 +227,6 @@ with Progress() as progress:
                     "val/pos_loss": pos_loss,
                     "val/neg_loss": neg_loss,
                     "val/improvement": orig_loss - loss,
-                    "c4_loss": c4_loss,
                     "n_seen": n_seen,
                 }
             )
@@ -261,56 +234,67 @@ with Progress() as progress:
 
 wandb.finish()
 
-# %%
-final_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-
-for multiplier in [
-    0.001,
-    0.005,
-    0.01,
-    0.02,
-    0.03,
-    0.04,
-    0.05,
-    0.075,
-    0.1,
-    0.125,
-    0.15,
-    0.2,
-]:
-    print(f"Multiplier: {multiplier}")
-    vector = SteeringVector(vector_layer, multiplier * final_vector.vector)
-    _, _, c4_loss = eval_step(model, c4_loader, vector)
-    _, _, loss = eval_step(model, eval_loader, vector)
-    pareto_loss.append(
-        {
-            "multiplier": multiplier,
-            "c4_loss": c4_loss,
-            "loss": loss,
-            "vector": "learned+scaled",
-        }
-    )
-
-for multiplier in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]:
-    print(f"Multiplier: {multiplier}")
-    vector = SteeringVector(vector_layer, multiplier * final_vector.vector)
-    _, _, c4_loss = eval_step(model, c4_loader, vector)
-    _, _, loss = eval_step(model, eval_loader, vector)
-    pareto_loss.append(
-        {
-            "multiplier": multiplier,
-            "c4_loss": c4_loss,
-            "loss": loss,
-            "vector": "static+scaled",
-        }
-    )
 
 # %%
+def collate_fn_c4(examples):
+    input_ids = t.stack([x["tokens"] for x in examples])
+    prompt_mask = t.zeros_like(input_ids)
+    prompt_mask[:, :64] = 1
+    pos_mask = t.ones(len(examples)).bool()
+
+    return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
+
+
+c4_data = load_dataset("NeelNanda/c4-10k", split="train[:2%]")
+c4_tokenized = tokenize_and_concatenate(c4_data, model.tokenizer, max_length=128)  # type: ignore
+c4_loader = DataLoader(
+    c4_tokenized.with_format("torch"),  # type: ignore
+    collate_fn=collate_fn_c4,
+    batch_size=32,
+)
+
+# %%
+baseline_loss = []
+for multiplier in [1, 2, 3, 5, 10, 15, 30]:
+    print(f"Multiplier: {multiplier}")
+    vector = SteeringVector(vector_layer, multiplier * original_vector)
+    _, _, loss = eval_step(model, vector, pos_eval_loader, neg_eval_loader)
+    print(loss)
+    # _, _, c4_loss = eval_step(model, vector, c4_loader)
+    # baseline_loss.append(
+    #     {
+    #         "multiplier": multiplier,
+    #         "c4_loss": c4_loss,
+    #         "loss": loss,
+    #         "vector": "static+scaled",
+    #     }
+    # )
+
+# %%
+final_vector = SteeringVector(vector_layer, vectors[5])
+
+
+loss_vanilla = []
+for multiplier in [1, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2]:
+    print(f"Multiplier: {multiplier}")
+    vector = SteeringVector(vector_layer, multiplier * final_vector.vector)
+    _, _, loss = eval_step(model, vector, pos_eval_loader, neg_eval_loader)
+    print(loss)
+    # _, _, c4_loss = eval_step(model, vector, c4_loader)
+    # loss_vanilla.append(
+    #     {
+    #         "multiplier": multiplier,
+    #         "c4_loss": c4_loss,
+    #         "loss": loss,
+    #         "vector": "vanilla",
+    #     }
+    # )
+
+# %%
+df = pl.DataFrame(baseline_loss + loss_vanilla).sort("c4_loss")
+
 fig = px.line(
-    pl.DataFrame(pareto_loss)
-    # .filter(c("vector") != "learned", c("multiplier") != 0.5)
-    .sort("c4_loss")
-    .to_pandas(),
+    df.to_pandas(),
     x="c4_loss",
     y="loss",
     markers=True,
@@ -320,11 +304,15 @@ fig = px.line(
     labels={"c4_loss": "Predictive loss on C4", "loss": "Steering loss"},
 )
 fig.show()
-fig.write_image("pareto_loss_larger_test.png")
+fig.write_image("pareto_l2_fixed.pdf")
 
 # %%
 final_vec = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
 eval_step(model, c4_loader, final_vec)
 
 # %%
-final_vector.save("learned_vector_layer_8.pt")
+
+_, vector_dir = utils.next_version(Path("../data") / dataset / "vectors")
+final_vector.save(vector_dir / "layer_8.pt")
+
+# %%

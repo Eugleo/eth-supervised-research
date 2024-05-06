@@ -11,6 +11,7 @@ from rich.progress import Progress
 from sv.datasets import Dataset, DictDataset
 from sv.loss import compute_spliced_llm_loss
 from sv.vectors import SteeringVector
+from torch.utils.data import ConcatDataset
 from typer import Argument, Option
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
@@ -67,7 +68,8 @@ def compute_loss(
                 f"Loading {dataset_name} v{dataset_version} and vectors v{vectors_version}..."
             )
 
-            dataset = Dataset.load(dataset_dir / "test.json").as_single_items()
+            dataset_list = Dataset.load(dataset_dir / "test.json").as_single_items()
+            dataset = ConcatDataset(dataset_list)
 
         batch_size = 1
         if device == "cuda":

@@ -53,7 +53,7 @@ def loss_change_per_layer(data: pl.DataFrame, title):
     )
 
 
-def loss_difference_per_layer(data: pl.DataFrame):
+def loss_difference_per_layer(data: pl.DataFrame, title):
     pos_losses = data.filter(c("origin") == "pos")
     neg_losses = data.filter(c("origin") == "neg")
 
@@ -79,4 +79,5 @@ def loss_difference_per_layer(data: pl.DataFrame):
         },
         color_discrete_sequence=scale,
         render_mode="svg",
+        title=title,
     )
