@@ -110,8 +110,8 @@ class Dataset:
         dataset = DictDataset(pairs)
         return dataset
 
-    def as_single_items(self) -> DictDataset:
-        prompts = [
+    def as_single_items(self) -> tuple[DictDataset, DictDataset]:
+        pos_prompts = [
             {
                 "index": i,
                 "prompt": item.question,
@@ -119,7 +119,8 @@ class Dataset:
                 "origin": "pos",
             }
             for i, item in enumerate(self._items)
-        ] + [
+        ]
+        neg_prompts = [
             {
                 "index": i,
                 "prompt": item.question,
@@ -128,8 +129,9 @@ class Dataset:
             }
             for i, item in enumerate(self._items)
         ]
-        dataset = DictDataset(prompts)
-        return dataset
+        pos_dataset = DictDataset(pos_prompts)
+        neg_dataset = DictDataset(neg_prompts)
+        return pos_dataset, neg_dataset
 
     @staticmethod
     def from_rimsky(path: Path) -> "Dataset":

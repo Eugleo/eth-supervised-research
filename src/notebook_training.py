@@ -86,8 +86,8 @@ model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 tokenizer = model.tokenizer
 
 _, dataset_dir = utils.current_version(Path("../data") / dataset / "dataset")
-train_data = Dataset.load(dataset_dir / "generate.json").as_single_items()
-val_data = Dataset.load(dataset_dir / "test.json").as_single_items()
+pos_train, neg_train = Dataset.load(dataset_dir / "generate.json").as_single_items()
+pos_eval, train_eval = Dataset.load(dataset_dir / "test.json").as_single_items()
 
 
 def collate_fn(examples):
@@ -106,18 +106,16 @@ def collate_fn(examples):
     return output | {"prompt_mask": prompt_mask, "pos_mask": pos_mask}
 
 
-batch_size = 64
+batch_size = 16
 
-train_loader = DataLoader(
-    train_data,
-    collate_fn=collate_fn,
-    batch_size=batch_size,
-    shuffle=True,
+pos_train_loader = DataLoader(
+    pos_train, collate_fn=collate_fn, batch_size=batch_size, shuffle=True
 )
-eval_loader = DataLoader(val_data, collate_fn=collate_fn, batch_size=batch_size)
-
-data = load_dataset("NeelNanda/c4-10k", split="train[:50%]")
-tokenized_data = tokenize_and_concatenate(data, model.tokenizer, max_length=128)  # type: ignore
+neg_train_loader = DataLoader(
+    neg_train, collate_fn=collate_fn, batch_size=batch_size, shuffle=True
+)
+pos_eval_loader = DataLoader(pos_eval, collate_fn=collate_fn, batch_size=batch_size)
+neg_eval_loader = DataLoader(neg_train, collate_fn=collate_fn, batch_size=batch_size)
 
 
 def collate_fn_c4(examples):
@@ -129,13 +127,14 @@ def collate_fn_c4(examples):
     return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
 
 
+c4_data = load_dataset("NeelNanda/c4-10k", split="train[:50%]")
+c4_tokenized = tokenize_and_concatenate(c4_data, model.tokenizer, max_length=128)  # type: ignore
 c4_loader = DataLoader(
-    tokenized_data.with_format("torch"),  # type: ignore
+    c4_tokenized.with_format("torch"),  # type: ignore
     collate_fn=collate_fn_c4,
     batch_size=32,
     shuffle=True,
 )
-
 
 for p in model.parameters():
     p.requires_grad = False
@@ -156,16 +155,19 @@ wandb.init(project="eth-supervised-research")
 
 
 @t.no_grad()
-def eval_step(model, loader, vector):
+def eval_step(model, vector, pos_loader, neg_loader=None):
     pos_loss, neg_loss = 0, 0
-    n, pos_n = len(loader.dataset), 0
-    for batch in track(loader, description="Evaluating..."):
-        losses = spliced_llm_loss(model, batch, vector)
-
-        is_pos = batch["pos_mask"]
-        pos_n += is_pos.sum().item()
-        pos_loss += losses[is_pos].sum().item()
-        neg_loss += losses[~is_pos].sum().item()
+    pos_n = len(pos_loader.dataset)
+    n = pos_n + len(neg_loader.dataset) if neg_loader is not None else pos_n
+    batches = (
+        zip(pos_loader, neg_loader)
+        if neg_loader is not None
+        else ((i, None) for i in pos_loader)
+    )
+    for pos_batch, neg_batch in track(batches, description="Evaluating..."):
+        pos_loss += spliced_llm_loss(model, pos_batch, vector).sum().item()
+        if neg_batch is not None:
+            neg_loss += spliced_llm_loss(model, neg_batch, vector).sum().item()
 
     pos_loss = pos_loss / pos_n if pos_n > 0 else 0
     neg_loss = neg_loss / (n - pos_n) if n - pos_n > 0 else 0
@@ -178,41 +180,43 @@ pareto_loss = []
 
 vectors = []
 
+batches = zip(pos_train_loader, neg_train_loader)
 n_seen = 0
 for epoch in range(epochs):
-    for i, batch in enumerate(track(train_loader, description=f"Epoch {epoch + 1}...")):
+    for i, (pos_batch, neg_batch) in enumerate(
+        track(batches, description=f"Epoch {epoch + 1}...")
+    ):
         optimizer.zero_grad()
         new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-        losses = spliced_llm_loss(model, batch, new_vector)
-
-        is_pos = batch["pos_mask"]
-        positive_loss, negative_loss = losses[is_pos].sum(), losses[~is_pos].sum()
+        pos_loss = spliced_llm_loss(model, pos_batch, new_vector).sum()
+        neg_loss = spliced_llm_loss(model, neg_batch, new_vector).sum()
+        loss = pos_loss - neg_loss
 
         similarity = F.cosine_similarity(new_vector.vector, original_vector, dim=0)
 
-        loss = positive_loss - negative_loss
-
         wandb.log(
             {
-                "train/pos_loss": positive_loss.item() / batch_size,
-                "train/neg_loss": negative_loss.item() / batch_size,
+                "train/pos_loss": pos_loss.item() / batch_size,
+                "train/neg_loss": neg_loss.item() / batch_size,
                 "train/cos_similarity": similarity.item(),
-                "train/loss": loss.item() / batch_size,
+                "train/loss": loss / batch_size,
                 "n_seen": n_seen,
             }
         )
 
         loss.backward()
         optimizer.step()
-        n_seen += len(batch["input_ids"])
+        n_seen += len(pos_batch["input_ids"]) + len(neg_batch["input_ids"])
 
     with t.no_grad():
         old_vector = SteeringVector(vector_layer, orig_vector.vector * 2)
-        _, _, orig_loss = eval_step(model, eval_loader, old_vector)
+        _, _, orig_loss = eval_step(model, old_vector, pos_eval_loader, neg_eval_loader)
 
         new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-        pos_loss, neg_loss, loss = eval_step(model, eval_loader, new_vector)
-        _, _, c4_loss = eval_step(model, c4_loader, new_vector)
+        pos_loss, neg_loss, loss = eval_step(
+            model, new_vector, pos_eval_loader, neg_eval_loader
+        )
+        _, _, c4_loss = eval_step(model, new_vector, c4_loader)
 
         pareto_loss.append(
             {
@@ -220,6 +224,7 @@ for epoch in range(epochs):
                 "c4_loss": c4_loss,
                 "loss": loss,
                 "vector": "learned",
+                "epoch": epoch,
             }
         )
         vectors.append(new_vector.vector.detach())
