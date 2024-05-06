@@ -65,17 +65,20 @@ def decompose_into_features(autoencoder, vector):
 
 # %%
 original_vector = load_vector(dataset, vector_layer).to(device)
-vector = decompose_into_features(autoencoder, original_vector)
+decomposed_vector = decompose_into_features(autoencoder, original_vector)
 
 
-# %%
 import os
 
 import torch.nn.functional as F
+import wandb
+from datasets import load_dataset
 from nnsight import LanguageModel
+from rich.progress import track
 from sv.datasets import Dataset, DictDataset
 from sv.loss import spliced_llm_loss
 from torch.utils.data import DataLoader
+from transformer_lens.utils import tokenize_and_concatenate
 
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 
@@ -106,12 +109,33 @@ def collate_fn(examples):
 batch_size = 64
 
 train_loader = DataLoader(
-    train_data, collate_fn=collate_fn, batch_size=batch_size, shuffle=True
+    train_data,
+    collate_fn=collate_fn,
+    batch_size=batch_size,
+    shuffle=True,
 )
 eval_loader = DataLoader(val_data, collate_fn=collate_fn, batch_size=batch_size)
 
-import wandb
-from rich.progress import track
+data = load_dataset("NeelNanda/c4-10k", split="train[:50%]")
+tokenized_data = tokenize_and_concatenate(data, model.tokenizer, max_length=128)  # type: ignore
+
+
+def collate_fn_c4(examples):
+    input_ids = t.stack([x["tokens"] for x in examples])
+    prompt_mask = t.zeros_like(input_ids)
+    prompt_mask[:, :64] = 1
+    pos_mask = t.ones(len(examples)).bool()
+
+    return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
+
+
+c4_loader = DataLoader(
+    tokenized_data.with_format("torch"),  # type: ignore
+    collate_fn=collate_fn_c4,
+    batch_size=32,
+    shuffle=True,
+)
+
 
 for p in model.parameters():
     p.requires_grad = False
@@ -121,7 +145,7 @@ for p in autoencoder.parameters():
     p.requires_grad = False
 autoencoder.eval()
 
-multipliers = t.nn.Parameter(vector.clone().detach())
+multipliers = t.nn.Parameter(decomposed_vector.clone().detach())
 orig_vector = SteeringVector(vector_layer, original_vector)
 
 epochs = 10
@@ -134,18 +158,21 @@ wandb.init(project="eth-supervised-research")
 @t.no_grad()
 def eval_step(model, loader, vector):
     pos_loss, neg_loss = 0, 0
-    n, pos_n = len(val_data), len(val_data) // 2
+    n, pos_n = len(loader.dataset), 0
     for batch in track(loader, description="Evaluating..."):
         losses = spliced_llm_loss(model, batch, vector)
 
         is_pos = batch["pos_mask"]
+        pos_n += is_pos.sum().item()
         pos_loss += losses[is_pos].sum().item()
         neg_loss += losses[~is_pos].sum().item()
 
-    loss = (pos_loss - neg_loss) / n
+    return pos_loss / pos_n, neg_loss / (n - pos_n), (pos_loss - neg_loss) / n
 
-    return pos_loss / pos_n, neg_loss / pos_n, loss
 
+pareto_loss = []
+
+vectors = []
 
 n_seen = 0
 for epoch in range(epochs):
@@ -176,29 +203,30 @@ for epoch in range(epochs):
         n_seen += len(batch["input_ids"])
 
     with t.no_grad():
+        old_vector = SteeringVector(vector_layer, orig_vector.vector * 2)
+        _, _, orig_loss = eval_step(model, eval_loader, old_vector)
+
         new_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
-        pos_loss, neg_loss = 0, 0
-        orig_vector_loss = 0
-        n, pos_n = len(val_data), len(val_data) // 2
-        for batch in track(eval_loader, description="Evaluating..."):
-            losses = spliced_llm_loss(model, batch, new_vector)
+        pos_loss, neg_loss, loss = eval_step(model, eval_loader, new_vector)
+        _, _, c4_loss = eval_step(model, c4_loader, new_vector)
 
-            is_pos = batch["pos_mask"]
-            pos_loss += losses[is_pos].sum().item()
-            neg_loss += losses[~is_pos].sum().item()
+        pareto_loss.append(
+            {
+                "multiplier": multipliers.norm().item(),
+                "c4_loss": c4_loss,
+                "loss": loss,
+                "vector": "learned",
+            }
+        )
+        vectors.append(new_vector.vector.detach())
 
-            orig_losses = spliced_llm_loss(model, batch, orig_vector)
-            orig_vector_loss += (
-                orig_losses[is_pos].sum().item() - orig_losses[~is_pos].sum().item()
-            )
-
-        new_vector_loss = (pos_loss - neg_loss) / n
         wandb.log(
             {
-                "val/loss": new_vector_loss,
-                "val/pos_loss": positive_loss.item() / pos_n,
-                "val/neg_loss": negative_loss.item() / pos_n,
-                "val/improvement": (orig_vector_loss / n) - new_vector_loss,
+                "val/loss": loss,
+                "val/pos_loss": pos_loss,
+                "val/neg_loss": neg_loss,
+                "val/improvement": orig_loss - loss,
+                "c4_loss": c4_loss,
                 "n_seen": n_seen,
             }
         )
@@ -206,36 +234,69 @@ for epoch in range(epochs):
 wandb.finish()
 
 # %%
-from datasets import load_dataset
-from transformer_lens.utils import tokenize_and_concatenate
+final_vector = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
 
-data = load_dataset("NeelNanda/c4-10k", split="train")
-tokenized_data = tokenize_and_concatenate(data, model.tokenizer, max_length=128)  # type: ignore
-
-
-# %%
-def collate_fn_c4(examples):
-    input_ids = t.stack([x["tokens"] for x in examples])
-    prompt_mask = t.zeros_like(input_ids)
-    prompt_mask[:, :64] = 1
-    pos_mask = t.ones(len(examples)).bool()
-
-    return {"input_ids": input_ids, "prompt_mask": prompt_mask, "pos_mask": pos_mask}
-
-
-c4_loader = DataLoader(
-    tokenized_data.with_format("torch"),  # type: ignore
-    collate_fn=collate_fn_c4,
-    batch_size=32,
-    shuffle=True,
-)
-
-losses = []
-for multiplier in [1, 5, 10, 15, 20, 25, 30]:
-    loss = 0
-    vector = SteeringVector(vector_layer, multiplier * orig_vector.vector)
-    pos_loss, _, _ = eval_step(model, eval_loader, vector)
+for multiplier in [
+    0.001,
+    0.005,
+    0.01,
+    0.02,
+    0.03,
+    0.04,
+    0.05,
+    0.075,
+    0.1,
+    0.125,
+    0.15,
+    0.2,
+]:
+    print(f"Multiplier: {multiplier}")
+    vector = SteeringVector(vector_layer, multiplier * final_vector.vector)
     _, _, c4_loss = eval_step(model, c4_loader, vector)
-    losses.append({"multiplier": multiplier, "c4_loss": loss, "pos_loss": pos_loss})
+    _, _, loss = eval_step(model, eval_loader, vector)
+    pareto_loss.append(
+        {
+            "multiplier": multiplier,
+            "c4_loss": c4_loss,
+            "loss": loss,
+            "vector": "learned+scaled",
+        }
+    )
+
+for multiplier in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]:
+    print(f"Multiplier: {multiplier}")
+    vector = SteeringVector(vector_layer, multiplier * final_vector.vector)
+    _, _, c4_loss = eval_step(model, c4_loader, vector)
+    _, _, loss = eval_step(model, eval_loader, vector)
+    pareto_loss.append(
+        {
+            "multiplier": multiplier,
+            "c4_loss": c4_loss,
+            "loss": loss,
+            "vector": "static+scaled",
+        }
+    )
 
 # %%
+fig = px.line(
+    pl.DataFrame(pareto_loss)
+    # .filter(c("vector") != "learned", c("multiplier") != 0.5)
+    .sort("c4_loss")
+    .to_pandas(),
+    x="c4_loss",
+    y="loss",
+    markers=True,
+    color="vector",
+    hover_data=["multiplier"],
+    title="Pareto frontier of Predictive loss v. Steering loss",
+    labels={"c4_loss": "Predictive loss on C4", "loss": "Steering loss"},
+)
+fig.show()
+fig.write_image("pareto_loss_larger_test.png")
+
+# %%
+final_vec = SteeringVector(vector_layer, multipliers @ autoencoder.W_dec)
+eval_step(model, c4_loader, final_vec)
+
+# %%
+final_vector.save("learned_vector_layer_8.pt")

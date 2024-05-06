@@ -39,17 +39,21 @@ set_seed(42)
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 
-DATASET = "weddings"
+DATASET = "gender"
 
 dataset_dir = Path("../data") / DATASET
 _, scores_dir = utils.current_version(dataset_dir / "scores")
-data = pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")]).filter(
-    c("loss").is_not_nan()
+data = (
+    pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")])
+    .filter(c("loss").is_not_nan())
+    .sort("layer", "multiplier")
 )
 
-plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
+# plots_version, plots_dir = utils.next_version(dataset_dir / "plots")
 # %%
-fig = plots.loss_change_per_layer(data)
+fig = plots.loss_change_per_layer(
+    data, "Change of loss after intervention (lower is better)"
+)
 fig.write_image(plots_dir / "loss_change_per_layer.pdf")
 fig.show()
 
@@ -156,7 +160,7 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
         "—", *[f"[b]{func(t, p)}[/b]" for p, t in zip(prompts, decoded_output)]
     )
 
-    for layer in range(12):
+    for layer in [8]:
         _, vector_dir = utils.current_version(dataset_dir / "vectors")
         sv = SteeringVector.load(vector_dir / f"layer_{layer}.pt", device="cpu")
         with model.generate(
@@ -180,33 +184,37 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     rprint(table)
 
 
-for coeff in [2]:
-    generate_text(wedding_stubs[10:], coeff, func=wedding_prompt)
+for coeff in [1.4]:
+    generate_text(sentence_stubs[10:], coeff, func=gender_prompt)
 
 
 # %%
-def generate_freeform(prompt, coeff, layer):
-    sv = SteeringVector.load(
-        dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
-    )
+_, vector_dir = utils.current_version(dataset_dir / "vectors")
+sv = SteeringVector.load(
+    Path("../data/gender/vectors/v2") / f"layer_8.pt", device="cpu"
+)
+sv = SteeringVector(sv.layer, sv.vector * 0.05)
 
-    with model.generate(
-        max_new_tokens=10,
-        scan=False,
-        validate=False,
-        pad_token_id=model.tokenizer.eos_token_id,
-        do_sample=True,
-        top_p=0.6,
-        temperature=1,
-    ) as runner:
-        with runner.invoke(prompt, scan=False) as _:
-            h = model.transformer.h[layer].output[0]
-            h[:] += coeff * sv.vector
+
+def generate_freeform(prompt, vector):
+    for _ in range(20):
+        with t.no_grad(), model.generate(
+            prompt,
+            scan=False,
+            validate=False,
+            do_sample=True,
+            pad_token_id=model.tokenizer.eos_token_id,
+            top_p=0.8,
+            temperature=1,
+        ) as _:
+            h = model.transformer.h[vector.layer].output[0]
+            h[:] += vector.vector
             steered_output = model.generator.output.save()
-    print(model.tokenizer.batch_decode(steered_output)[0])
+        prompt = model.tokenizer.batch_decode(steered_output.value)[0]
+    print(prompt)
 
 
-generate_freeform("Between a doll and a toy gun, I prefer the", 8, 8)
+generate_freeform("In the picture we see a", sv)
 
 
 # %%
@@ -303,44 +311,3 @@ def p_successful_rollout(
 
 rollouts, fig = p_successful_rollout(model, "I think you're", batch_size=200)
 fig.show()
-
-
-# %%
-
-layer = 10
-
-baseline_perplexity = df.filter(c("layer").is_null())["loss"].median()
-baseline_p_success = (
-    rollouts.filter(c("multiplier") == 0)
-    .filter(c("layer") == layer)["p_success"]
-    .median()
-)
-
-pareto = (
-    df.group_by("layer", "multiplier")
-    .agg(c("loss").median().alias("mean_perplexity"))
-    .join(rollouts, on=["layer", "multiplier"])
-    .filter(c("layer") == layer)
-    .sort("mean_perplexity", "p_success")
-)
-
-fig = px.line(
-    pareto.to_pandas(),
-    x="mean_perplexity",
-    y="p_success",
-    labels={"layer": "Layer"},
-    markers=True,
-    title=f"Pareto front for layer {layer}",
-    custom_data=["multiplier"],
-)
-# fig.update_yaxes(matches=None)
-# fig.update_xaxes(matches=None)
-fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
-fig.add_vline(x=baseline_perplexity, line_dash="dot", line_color="red")
-fig.write_image(plot_dir / "pareto.pdf")
-fig.update_traces(
-    hovertemplate="<br>".join(["ColX: %{x}", "ColY: %{y}", "Col1: %{customdata[0]}"])
-)
-
-fig.show()
-# %%

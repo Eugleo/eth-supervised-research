@@ -13,15 +13,18 @@ def get_color_scale(data: pl.DataFrame, column: str, scale):
     )
 
 
-def loss_change_per_layer(data: pl.DataFrame):
+def loss_change_per_layer(data: pl.DataFrame, title):
     baselines = (
         data.filter(c("multiplier") == 0)
         .select("index", "origin", c("loss").alias("loss_baseline"))
         .unique()
     )
 
+    nonempty_layers = data.filter(c("multiplier") != 0).get_column("layer").unique()
+
     deltas = (
-        data.join(baselines, on=["index", "origin"])
+        data.filter(c("layer").is_in(nonempty_layers))
+        .join(baselines, on=["index", "origin"])
         .with_columns((c("loss_baseline") - c("loss")).alias("loss_delta"))
         .group_by("layer", "multiplier", "origin")
         .agg(c("loss_delta").mean().alias("loss_delta_mean"))
@@ -39,13 +42,14 @@ def loss_change_per_layer(data: pl.DataFrame):
         markers=True,
         color_discrete_sequence=scale,
         labels={
-            "loss_delta_mean": "Mean drop of SplicedLLMLoss",
+            "loss_delta_mean": "Mean ∆Loss",
             "layer": "Layer with intervention",
             "multiplier": "Vector multiplier",
-            "origin": "Dataset kind",
+            "origin": "Dataset",
         },
         height=300 * len(deltas["origin"].unique()),
         render_mode="svg",
+        title=title,
     )
 
 

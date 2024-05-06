@@ -24,7 +24,7 @@ class DictDataset(td.Dataset):
 
     @staticmethod
     def from_openwebtext(
-        limit: int, prompt_len: int, tokenizer: PreTrainedTokenizer
+        limit: int, prompt_len: int, tokenizer: PreTrainedTokenizer, max_len: int = 128
     ) -> "DictDataset":
         dataset = load_dataset(
             "Skylion007/openwebtext", streaming=True, trust_remote_code=True
@@ -38,9 +38,9 @@ class DictDataset(td.Dataset):
                 item["text"], return_tensors="pt", truncation=True
             ).input_ids
             prompt = tokenizer.batch_decode(tokens[:, :prompt_len])[0].strip()
-            completion = tokenizer.batch_decode(
-                tokens[:, prompt_len : tokenizer.model_max_length - 1]
-            )[0].strip()
+            completion = tokenizer.batch_decode(tokens[:, prompt_len:max_len])[
+                0
+            ].strip()
             items.append(
                 {
                     "index": i,

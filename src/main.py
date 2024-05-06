@@ -28,30 +28,7 @@ def compute_loss(
     device: Annotated[str, Option()] = "cpu",
 ):
     if not multipliers:
-        multipliers = [
-            -40,
-            -30,
-            -20,
-            -15,
-            -10,
-            -8,
-            -6,
-            -4,
-            -2,
-            -1,
-            -0.5,
-            0.5,
-            1,
-            2,
-            4,
-            6,
-            8,
-            10,
-            15,
-            20,
-            30,
-            40,
-        ]
+        multipliers = [-1, -0.5, -0.2, -0.15, -0.1, -0.05, 0.05, 0.1, 0.15, 0.2, 0.5, 1]
     utils.set_seed(seed)
     model = LanguageModel(model_id, device_map=device, dispatch=True)
 
