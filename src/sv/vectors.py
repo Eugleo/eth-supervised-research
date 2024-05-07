@@ -12,6 +12,12 @@ class SteeringVector:
     layer: int
     vector: t.Tensor
 
+    def __mul__(self, other: float):
+        return SteeringVector(layer=self.layer, vector=self.vector * other)
+
+    def __rmul__(self, other: float):
+        return self.__mul__(other)
+
     @staticmethod
     def load(path: Path, device="cpu") -> "SteeringVector":
         data = t.load(path, map_location=device)

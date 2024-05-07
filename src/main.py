@@ -44,7 +44,7 @@ def compute_loss(
                 int(limit), int(prompt_len), model.tokenizer
             )
 
-            vectors_version, vectors_dir = utils.current_version(
+            vectors_version, vectors_dir = utils.get_version(
                 Path(data_dir) / vector_dataset_name / "vectors"
             )
             vectors = [
@@ -54,11 +54,11 @@ def compute_loss(
                 f"Loading {limit} items in OWT and {vector_dataset_name} vectors v{vectors_version}..."
             )
         else:
-            dataset_version, dataset_dir = utils.current_version(
+            dataset_version, dataset_dir = utils.get_version(
                 Path(data_dir) / dataset_name / "dataset"
             )
 
-            vectors_version, vectors_dir = utils.current_version(
+            vectors_version, vectors_dir = utils.get_version(
                 Path(data_dir) / dataset_name / "vectors"
             )
             vectors = [
@@ -80,7 +80,7 @@ def compute_loss(
 
         if "openwebtext" in dataset_name:
             if vector_dataset_name in already_increased:
-                scores_version, scores_dir = utils.current_version(
+                scores_version, scores_dir = utils.get_version(
                     Path(data_dir) / vector_dataset_name / "scores"
                 )
                 already_increased.add(vector_dataset_name)
@@ -91,7 +91,7 @@ def compute_loss(
             filename = dataset_definition.replace("-", "_")
         else:
             if dataset_name in already_increased:
-                scores_version, scores_dir = utils.current_version(
+                scores_version, scores_dir = utils.get_version(
                     Path(data_dir) / dataset_name / "scores"
                 )
                 already_increased.add(dataset_name)
@@ -116,7 +116,7 @@ def generate_vectors(
     utils.set_seed(seed)
     model = LanguageModel(model_id, device_map=device, dispatch=True)
     for dataset_name in datasets:
-        dataset_version, dataset_dir = utils.current_version(
+        dataset_version, dataset_dir = utils.get_version(
             Path(data_dir) / dataset_name / "dataset"
         )
         print(

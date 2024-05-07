@@ -13,7 +13,7 @@ from sv.vectors import SteeringVector
 cross_entropy = t.nn.CrossEntropyLoss(reduction="none")
 
 
-def spliced_llm_loss(
+def llm_loss(
     model: LanguageModel,
     batch: dict,
     vector: Optional[SteeringVector] = None,
@@ -21,8 +21,8 @@ def spliced_llm_loss(
     assert isinstance(model.device, t.device)
     cross_entropy.to(model.device)
 
-    tokens = batch["input_ids"]
-    is_prompt = batch["prompt_mask"]
+    tokens = batch["input_ids"].to(model.device)
+    is_prompt = batch["prompt_mask"].to(model.device)
     with model.trace(tokens, scan=False, validate=False) as _:  # type: ignore
         if vector is not None:
             h = model.transformer.h[vector.layer].output[0]
@@ -43,7 +43,7 @@ def _annotated_loss(
     sv: Optional[SteeringVector] = None,
 ):
     vector = SteeringVector(sv.layer, sv.vector * multiplier) if sv else None
-    losses = spliced_llm_loss(model, batch, vector)
+    losses = llm_loss(model, batch, vector)
     n = len(batch["input_ids"])
     return [
         {

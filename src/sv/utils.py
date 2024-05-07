@@ -1,6 +1,7 @@
 import os
 import random
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch as t
@@ -18,16 +19,16 @@ def set_seed(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def current_version(path: Path) -> tuple[int, Path]:
+def get_version(path: Path, version: Optional[int] = None) -> tuple[int, Path]:
     with open(path / ".version") as f:
-        version = int(f.read().strip())
-        return version, path / f"v{version}"
+        latest_version = int(f.read().strip())
+        if version is not None and version < latest_version:
+            return version, path / f"v{version}"
+        return latest_version, path / f"v{latest_version}"
 
 
 def next_version(path: Path) -> tuple[int, Path]:
-    previous_version = (
-        0 if not (path / ".version").exists() else current_version(path)[0]
-    )
+    previous_version = 0 if not (path / ".version").exists() else get_version(path)[0]
     version = previous_version + 1
     with open(path / ".version", "w") as f:
         f.write(str(version))

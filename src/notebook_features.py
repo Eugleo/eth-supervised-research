@@ -13,7 +13,7 @@ from transformer_lens import utils as tutils
 
 vector_layer = 8  # vectors are trained on resid_post
 sae_layer = vector_layer + 1  # saes are trained on resid_pre
-device = t.device("cpu")
+device = t.device("cuda")
 dataset = "gender"
 
 
@@ -42,14 +42,16 @@ set_seed(42)
 dataset = "gender"
 
 dataset_dir = Path("../data") / dataset
-_, vector_dir = utils.current_version(dataset_dir / "vectors")
+_, vector_dir = utils.get_version(dataset_dir / "vectors")
 
 autoencoder = SparseAutoencoder.from_pretrained(
     "gpt2-small-res-jb", f"blocks.{sae_layer}.hook_resid_pre"
 )
 autoencoder.to(device)
 
-vector = SteeringVector.load(vector_dir / f"layer_{vector_layer}.pt").vector.to(device)
+vector = sv = SteeringVector.load(
+    Path("../data/gender/vectors/v1") / f"layer_8.pt", device="cuda"
+).vector.to(device)
 
 model = HookedTransformer.from_pretrained("gpt2-small")
 model.to(device)
@@ -91,7 +93,7 @@ all_tokens = all_tokens.to(device)
 sae_vis_config = SaeVisConfig(
     hook_point=f"blocks.{sae_layer}.hook_resid_pre",
     features=sim_feature_indices.tolist(),
-    batch_size=64,
+    batch_size=32,
     verbose=True,
 )
 
@@ -99,7 +101,7 @@ sae_vis_data = SaeVisData.create(
     encoder=autoencoder, model=model, tokens=all_tokens, cfg=sae_vis_config
 )
 
-filename = f"_vec-layer-{vector_layer}_dataset-{dataset}_masculine-0.998.html"
+filename = f"_vec-layer-{vector_layer}_dataset-{dataset}_masculine-0.999.html"
 sae_vis_data.save_feature_centric_vis(
     filename, feature_idx=sim_feature_indices.tolist()[0]
 )

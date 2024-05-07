@@ -38,11 +38,12 @@ def set_seed(seed: int) -> None:
 set_seed(42)
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+model.to("cuda")
 
 DATASET = "gender"
 
 dataset_dir = Path("../data") / DATASET
-scores_version, scores_dir = utils.current_version(dataset_dir / "scores")
+scores_version, scores_dir = utils.get_version(dataset_dir / "scores", version=1)
 data = (
     pl.concat([pl.read_csv(file) for file in scores_dir.glob("*.csv")])
     .filter(c("loss").is_not_nan())
@@ -165,8 +166,9 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     )
 
     for layer in [8]:
-        _, vector_dir = utils.current_version(dataset_dir / "vectors")
-        sv = SteeringVector.load(vector_dir / f"layer_{layer}.pt", device="cpu")
+        sv = SteeringVector.load(
+            Path("../data/gender/vectors/v6") / f"layer_8.pt", device="cuda"
+        )
         with model.generate(
             max_new_tokens=1,
             scan=False,
@@ -188,21 +190,20 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
     rprint(table)
 
 
-for coeff in [0.05]:
+for coeff in [0.75, 1, 1.25]:
     generate_text(gender_stubs[10:], coeff, func=gender_prompt)
 
 
 # %%
-_, vector_dir = utils.current_version(dataset_dir / "vectors")
-sv = SteeringVector.load(
-    Path("../data/gender/vectors/v1") / f"layer_8.pt", device="cpu"
-)
-sv = SteeringVector(sv.layer, sv.vector * 3)
+_, baseline_vector_dir = utils.get_version(dataset_dir / "vectors", version=1)
+baseline_vector = SteeringVector.load(baseline_vector_dir / "layer_8.pt", device="cuda")
 
-# sv = SteeringVector.load(
-#     Path("../data/gender/vectors/v4") / f"layer_8.pt", device="cpu"
-# )
-# sv = SteeringVector(sv.layer, sv.vector * 0.15)
+_, vector_dir = utils.get_version(dataset_dir / "vectors", version=8)
+vector = SteeringVector.load(vector_dir / "layer_8.pt", device="cuda")
+
+
+sv = baseline_vector * 3
+sv = vector * 1.5
 
 
 def generate_freeform(start_prompt, vector):
@@ -212,52 +213,57 @@ def generate_freeform(start_prompt, vector):
         width=60,
     )
     for _ in range(5):
-        prompt = start_prompt
-        for i in range(20):
-            with t.no_grad(), model.generate(
-                prompt,
-                scan=False,
-                validate=False,
-                do_sample=True,
-                pad_token_id=model.tokenizer.eos_token_id,
-                top_p=0.6,
-                temperature=1,
-            ) as _:
-                if i == 0:
-                    h = model.transformer.h[vector.layer].output[0]
-                    h[:] += vector.vector
-                steered_output = model.generator.output.save()
-            prompt = model.tokenizer.batch_decode(steered_output.value)[0]
+        with t.no_grad(), model.generate(
+            start_prompt,
+            max_new_tokens=40,
+            scan=False,
+            validate=False,
+            pad_token_id=model.tokenizer.eos_token_id,
+            do_sample=True,
+            top_p=0.6,
+            temperature=1,
+        ) as _:
+            model.transformer.h[vector.layer].output[0][:] += vector.vector
+            steered_output = model.generator.output.save()
+        prompt = model.tokenizer.batch_decode(steered_output.value)[0]
         completions.add_row(prompt)
     rprint(completions)
 
 
-generate_freeform("Now more about my family. My", sv)
+# sv = SteeringVector.load(vector_dir / "layer_8.pt", device="cuda") * 3
+generate_freeform("My favorite doll is a little", sv)
 
 
 # %%
+model.to("cuda")
+
+
 def has_keyword(text, keywords):
     if any(k in text for k in keywords):
-        return any(re.findall(rf"\b{k}\b", text) for k in keywords)
+        return any(re.findall(rf"\b{k}s?\b", text) for k in keywords)
     return False
 
 
 def p_successful_rollout(
     model,
     prompt,
-    coeffs=[0, 2, 4, 6, 8, 10, 12, 16, 20],
+    coeffs=[0.1, 0.15, 0.2, 1, 1.5, 2, 3, 5, 10],
     length=40,
     batch_size=200,
     keywords=[
-        "wedding",
-        "weddings",
-        "wed",
-        "marry",
-        "married",
-        "marriage",
-        "bride",
-        "groom",
-        "honeymoon",
+        "dad",
+        "father",
+        "brother",
+        "man",
+        "men",
+        "dude",
+        "buddy",
+        "boy",
+        "guy",
+        "gun",
+        "prince",
+        "king",
+        "husband",
     ],
 ):
     rollouts = []
@@ -270,7 +276,7 @@ def p_successful_rollout(
         validate=False,
         pad_token_id=model.tokenizer.eos_token_id,
         do_sample=True,
-        top_p=0.3,
+        top_p=0.8,
         temperature=1,
     ) as _:
         baseline_output = model.generator.output.save()
@@ -282,13 +288,14 @@ def p_successful_rollout(
     )
 
     with Progress() as progress:
-        task = progress.add_task(
-            "Generating rollouts...", total=len(coeffs) * model.config.n_layer
-        )
-        for layer in [7, 8, 9, 10]:
+        task = progress.add_task("Generating rollouts...", total=len(coeffs))
+        for layer in [8]:
             sv = SteeringVector.load(
-                dataset_dir / "vectors" / f"layer_{layer}.pt", device="cuda"
+                Path("../data/gender/vectors/v1") / f"layer_8.pt", device="cuda"
             )
+            # sv = SteeringVector.load(
+            #     Path("../data/gender/vectors/v8") / f"layer_8.pt", device="cuda"
+            # )
             for coeff in coeffs:
                 with t.no_grad(), model.generate(
                     batch,
@@ -297,7 +304,7 @@ def p_successful_rollout(
                     validate=False,
                     pad_token_id=model.tokenizer.eos_token_id,
                     do_sample=True,
-                    top_p=0.9,
+                    top_p=0.8,
                     temperature=1,
                 ) as _:
                     model.transformer.h[layer].output[0][:] += coeff * sv.vector
@@ -317,15 +324,15 @@ def p_successful_rollout(
     rollouts = pl.DataFrame(rollouts)
     fig = px.line(
         rollouts.to_pandas(),
-        x="layer",
+        x="multiplier",
         y="p_success",
-        color="coeff",
         markers=True,
-        color_discrete_sequence=px.colors.sequential.OrRd,
     )
     fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
     return rollouts, fig
 
 
-rollouts, fig = p_successful_rollout(model, "I think you're", batch_size=200)
+rollouts, fig = p_successful_rollout(model, "I went up to my fried", batch_size=200)
 fig.show()
+
+# %%
