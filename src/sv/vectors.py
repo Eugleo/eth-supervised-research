@@ -13,10 +13,13 @@ class SteeringVector:
     vector: t.Tensor
 
     def __mul__(self, other: float):
-        return SteeringVector(layer=self.layer, vector=self.vector * other)
+        return SteeringVector(layer=self.layer, vector=other * self.vector)
 
     def __rmul__(self, other: float):
         return self.__mul__(other)
+
+    def __neg__(self):
+        return -1 * self
 
     @staticmethod
     def load(path: Path, device="cpu") -> "SteeringVector":

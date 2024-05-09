@@ -1,3 +1,4 @@
+import re
 from functools import partial
 from typing import List, Optional
 
@@ -11,6 +12,77 @@ from torch.utils.data import DataLoader, Dataset
 from sv.vectors import SteeringVector
 
 cross_entropy = t.nn.CrossEntropyLoss(reduction="none")
+
+
+def activations(
+    model: LanguageModel,
+    batch: dict,
+    layer: int,
+    vector: Optional[SteeringVector] = None,
+):
+    assert isinstance(model.device, t.device)
+
+    tokens = batch["input_ids"].to(model.device)
+    is_prompt = batch["prompt_mask"].to(model.device)
+    with model.trace(tokens, scan=False, validate=False) as _:  # type: ignore
+        if vector is not None:
+            h = model.transformer.h[vector.layer].output[0]
+            h[is_prompt] += vector.vector
+        activations = model.transformer.h[layer].output[0].t[-1].save()
+
+    return activations.value
+
+
+def has_keyword(text, keywords):
+    if any(k in text for k in keywords):
+        return any(re.findall(rf"\b{k}'?s?\b", text) for k in keywords)
+    return False
+
+
+def p_successful_rollout(
+    model, prompt, sv, keywords, multipliers=[1], length=40, batch_size=200
+):
+    rollouts = {}
+    batch = [prompt] * batch_size
+
+    with t.no_grad(), model.generate(
+        batch,
+        max_new_tokens=length,
+        scan=False,
+        validate=False,
+        pad_token_id=model.tokenizer.eos_token_id,
+        do_sample=True,
+        top_p=0.8,
+        temperature=1,
+    ) as _:
+        baseline_output = model.generator.output.save()
+    baseline_decoded = model.tokenizer.batch_decode(
+        baseline_output, skip_special_tokens=True
+    )
+    baseline_p_success = (
+        sum(any(k in d for k in keywords) for d in baseline_decoded) / batch_size
+    )
+    rollouts[0] = baseline_p_success
+
+    for multiplier in multipliers:
+        with t.no_grad(), model.generate(
+            batch,
+            max_new_tokens=length,
+            scan=False,
+            validate=False,
+            pad_token_id=model.tokenizer.eos_token_id,
+            do_sample=True,
+            top_p=0.8,
+            temperature=1,
+        ) as _:
+            model.transformer.h[sv.layer].output[0][:] += multiplier * sv.vector
+            steered_output = model.generator.output.save()
+        decoded = model.tokenizer.batch_decode(steered_output, skip_special_tokens=True)
+        rollouts[multiplier] = (
+            sum(has_keyword(d, keywords) for d in decoded) / batch_size
+        )
+
+    return rollouts
 
 
 def llm_loss(

@@ -2,21 +2,68 @@ import os
 from pathlib import Path
 from typing import Annotated, List
 
-import polars as pl
 import sv.utils as utils
-import torch as t
 import typer
 from nnsight import LanguageModel
 from rich.progress import Progress
-from sv.datasets import Dataset, DictDataset
-from sv.loss import compute_spliced_llm_loss
+from sv import utils
+from sv.datasets import C4DataModule, Dataset, DictDataset, PairDataModule
+from sv.scoring import compute_spliced_llm_loss
+from sv.train import Trainer
 from sv.vectors import SteeringVector
 from torch.utils.data import ConcatDataset
 from typer import Argument, Option
 
+import wandb
+
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
 
 app = typer.Typer()
+
+
+def run_training():
+    wandb.init()
+    wandb.define_metric("val/goodness", summary="max")
+
+    config = wandb.config
+    utils.set_seed(config.seed)
+    trainer = Trainer(config)
+
+    _, dataset_dir = utils.get_version(Path("data") / config.dataset / "dataset")
+    pair_module = PairDataModule(
+        dataset_dir, trainer.model.tokenizer, config.batch_size
+    )
+    neutral_module = C4DataModule(trainer.model.tokenizer)
+
+    trainer.train(pair_module, neutral_module)
+
+    wandb.finish()
+
+
+@app.command()
+def train():
+    sweep_config = {
+        "method": "bayes",
+        "metric": {"goal": "maximize", "name": "val/goodness.max"},
+        "parameters": {
+            "lr": {"min": 0.008, "max": 0.1},
+            "alpha": {"min": 0.0, "max": 1.0},
+            "omega": {"min": 0.0, "max": 1.0},
+            "dataset": {"value": "gender"},
+            "epochs": {"value": 30},
+            "batch_size": {"value": 64},
+            "act_layer": {"value": 8},
+            "vector_layer": {"value": 8},
+            "autoencoder": {"value": "gpt2-small-res-jb"},
+            "model": {"value": "openai-community/gpt2"},
+            "device": {"value": "cuda"},
+            "baseline_vector_dir": {"value": "data/gender/vectors/v1"},
+            "seed": {"value": 42},
+        },
+    }
+
+    sweep_id = wandb.sweep(sweep=sweep_config, project="eth-supervised-research")
+    wandb.agent(sweep_id, function=run_training)
 
 
 @app.command()
