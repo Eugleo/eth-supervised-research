@@ -148,15 +148,19 @@ class Trainer:
 
         self.config = config
 
-        self.multipliers = t.nn.Parameter(t.zeros_like(feature_acts))
-        self.optimizer = t.optim.Adam([self.multipliers], lr=config.lr)
+        self.vector_vector = t.nn.Parameter((3 * v).detach().clone())
+
+        # self.multipliers = t.nn.Parameter(t.zeros_like(feature_acts))
+        # self.optimizer = t.optim.Adam([self.multipliers], lr=config.lr)
+        self.optimizer = t.optim.Adam([self.vector_vector], lr=config.lr)
 
     @property
     def vector(self):
-        return SteeringVector(
-            self.config.vector_layer,
-            self.multipliers @ self.autoencoder.W_dec + self.baseline_vector.vector,
-        )
+        # return SteeringVector(
+        #     self.config.vector_layer,
+        #     self.multipliers @ self.autoencoder.W_dec + self.baseline_vector.vector,
+        # )
+        return SteeringVector(self.config.vector_layer, self.vector_vector)
 
     def get_all_metrics(self, vector, pos_loader, neg_loader, eval_c4_loader, progress):
         add_pos_loss, add_neg_loss, add_acc = self.eval(
@@ -200,14 +204,17 @@ class Trainer:
 
     def get_wanb_dict(self, base, our):
         return {
+            "val/add_pos_loss": our["add_pos_loss"],
+            "val/add_neg_loss": our["add_neg_loss"],
+            "val/sub_pos_loss": our["sub_pos_loss"],
+            "val/sub_neg_loss": our["sub_neg_loss"],
             "val/∆(add_acc)": our["add_acc"] - base["add_acc"],
             "val/∆(sub_acc)": base["sub_acc"] - our["sub_acc"],
-            "val/∆(add_pos_loss)": base["add_pos_loss"] - our["add_pos_loss"],
-            "val/∆(add_neg_loss)": our["add_neg_loss"] - base["add_neg_loss"],
-            "val/∆(sub_pos_loss)": our["sub_pos_loss"] - base["sub_pos_loss"],
-            "val/∆(sub_neg_loss)": base["sub_neg_loss"] - our["sub_neg_loss"],
             "val/∆(c4_loss)": base["c4_loss"] - our["c4_loss"],
             "val/∆(p_success)": our["p_success"] - base["p_success"],
+            "val/goodness": min(
+                base["c4_loss"] - our["c4_loss"], our["p_success"] - base["p_success"]
+            ),
         }
 
     def train(self, pos_loader, neg_loader, pos_eval_loader, neg_eval_loader):
@@ -250,18 +257,25 @@ class Trainer:
                     sub_pos_loss = llm_loss(self.model, pos_batch, -1 * v).sum()
                     sub_neg_loss = llm_loss(self.model, neg_batch, -1 * v).sum()
 
-                    c4_loss = llm_loss(self.model, neutral_batch, v).sum()
+                    # baseline_c4_loss = llm_loss(self.model, neutral_batch, v).sum()
+                    # c4_loss = llm_loss(self.model, neutral_batch, v).sum()
 
-                    penalty_l1 = self.multipliers.abs().sum()
-                    penalty_l2 = self.multipliers.pow(2).sum()
+                    # penalty_l1 = self.multipliers.abs().sum()
+                    # penalty_l2 = self.multipliers.pow(2).sum()
+                    # penalty_l1 = self.multipliers.abs().sum()
+                    penalty_l2 = (
+                        (self.vector.vector - self.baseline_vector.vector).pow(2).sum()
+                    )
+
+                    cfg = self.config
 
                     loss = (
-                        self.config.alpha_p * add_pos_loss
-                        - self.config.alpha_n * add_neg_loss
-                        + self.config.sigma_p * sub_neg_loss
-                        - self.config.sigma_n * sub_pos_loss
-                        + self.config.gamma * c4_loss
-                        + self.config.l1 * penalty_l1
+                        cfg.alpha_p * add_pos_loss
+                        # - cfg.alpha_n * add_neg_loss
+                        + cfg.sigma_n * sub_neg_loss
+                        # - cfg.sigma_p * sub_pos_loss
+                        # + self.config.gamma * c4_loss
+                        # + self.config.l1 * penalty_l1
                         + self.config.l2 * penalty_l2
                     )
 
@@ -398,6 +412,8 @@ def compute_tradeoff(trainer, vector, multipliers, name):
 def run_training():
     wandb.init()
 
+    wandb.define_metric("val/goodness", summary="max")
+
     config = wandb.config
     set_seed(config.seed)
 
@@ -410,19 +426,19 @@ def run_training():
 
 # %%
 sweep_config = {
-    "method": "random",
-    "metric": {"goal": "maximize", "name": "val/∆(c4_loss)"},
+    "method": "bayes",
+    "metric": {"goal": "maximize", "name": "val/goodness.max"},
     "parameters": {
-        "lr": {"values": [1e-1, 1e-2, 1e-3, 1e-4]},
-        "l1": {"min": 0.0, "max": 1.0},
-        "l2": {"min": 0.0, "max": 1.0},
+        "lr": {"min": 1e-5, "max": 1e-2},
         "alpha_p": {"min": 0.0, "max": 1.0},
-        "alpha_n": {"min": 0.0, "max": 1.0},
-        "sigma_p": {"min": 0.0, "max": 1.0},
+        # "alpha_n": {"min": 0.0, "max": 1.0},
         "sigma_n": {"min": 0.0, "max": 1.0},
-        "gamma": {"min": 0.0, "max": 1.0},
+        # "sigma_p": {"min": 0.0, "max": 1.0},
+        "l2": {"min": 0.0, "max": 1.0},
+        "l1": {"value": 0.0},
+        "gamma": {"value": 0.0},
         "dataset": {"value": "gender"},
-        "epochs": {"value": 20},
+        "epochs": {"value": 15},
         "batch_size": {"value": 64},
         "vector_layer": {"value": 8},
         "autoencoder": {"value": "gpt2-small-res-jb"},
