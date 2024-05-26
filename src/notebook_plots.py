@@ -37,8 +37,10 @@ def set_seed(seed: int) -> None:
 
 set_seed(42)
 
+device = "cpu"
+
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
-model.to("cuda")
+model.to(device)
 
 DATASET = "gender"
 
@@ -121,9 +123,9 @@ wedding_stubs = [
 
 def gender_prompt(text, prompt):
     result = text.removeprefix(prompt).strip()
-    if result in ["boy", "brother", "father", "man"]:
+    if any(w in result for w in ["boy", "brother", "father", "man"]):
         color = "dark_blue"
-    elif result in ["girl", "sister", "mother", "woman"]:
+    elif any(w in result for w in ["girl", "sister", "mother", "woman"]):
         color = "hot_pink3"
     else:
         color = "gray"
@@ -141,11 +143,12 @@ def wedding_prompt(text, prompt):
 
 def generate_text(prompts, coeff: float, func=gender_prompt):
     table = Table(
-        "# L",
-        *[f"Ex. {n}" for n in range(len(prompts))],
-        title=f"One-word completion after adding vector with coeff {coeff} to different layers",
+        "Prompt",
+        "No steering",
+        f"Steering with {coeff} × vector",
+        title="One-word completion for a prompt",
         show_lines=True,
-        width=110,
+        width=80,
     )
 
     with model.generate(
@@ -157,17 +160,13 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
         with runner.invoke(prompts, scan=False) as _:
             default_output = model.generator.output.save()
 
-    decoded_output = model.tokenizer.batch_decode(
+    default_output = model.tokenizer.batch_decode(
         default_output, skip_special_tokens=True
-    )
-
-    table.add_row(
-        "—", *[f"[b]{func(t, p)}[/b]" for p, t in zip(prompts, decoded_output)]
     )
 
     for layer in [8]:
         sv = SteeringVector.load(
-            Path("../data/gender/vectors/v6") / f"layer_8.pt", device="cuda"
+            Path("../data/gender/vectors/v1") / f"layer_8.pt", device=device
         )
         with model.generate(
             max_new_tokens=1,
@@ -183,15 +182,14 @@ def generate_text(prompts, coeff: float, func=gender_prompt):
         decoded_output = model.tokenizer.batch_decode(
             steered_output, skip_special_tokens=True
         )
-        table.add_row(
-            f"{layer}", *[func(t, p) for p, t in zip(prompts, decoded_output)]
-        )
+        for prompt, unsteered, steered in zip(prompts, default_output, decoded_output):
+            table.add_row(prompt, func(unsteered, prompt), func(steered, prompt))
 
     rprint(table)
 
 
-for coeff in [0.75, 1, 1.25]:
-    generate_text(gender_stubs[10:], coeff, func=gender_prompt)
+for coeff in [1]:
+    generate_text(gender_stubs[:3], -coeff, func=gender_prompt)
 
 
 # %%
@@ -235,104 +233,79 @@ generate_freeform("My favorite doll is a little", sv)
 
 
 # %%
-model.to("cuda")
+from sv import scoring
 
+GENDER_KEYWORDS = [
+    "dad",
+    "father",
+    "brother",
+    "man",
+    "men",
+    "dude",
+    "buddy",
+    "boy",
+    "guy",
+    "gun",
+    "prince",
+    "king",
+    "husband",
+]
 
-def has_keyword(text, keywords):
-    if any(k in text for k in keywords):
-        return any(re.findall(rf"\b{k}s?\b", text) for k in keywords)
-    return False
+vector = SteeringVector.load(
+    Path("../data/gender/vectors/v1") / f"layer_8.pt", device=device
+)
 
-
-def p_successful_rollout(
+result = scoring.p_successful_rollout(
     model,
-    prompt,
-    coeffs=[0.1, 0.15, 0.2, 1, 1.5, 2, 3, 5, 10],
-    length=40,
-    batch_size=200,
-    keywords=[
-        "dad",
-        "father",
-        "brother",
-        "man",
-        "men",
-        "dude",
-        "buddy",
-        "boy",
-        "guy",
-        "gun",
-        "prince",
-        "king",
-        "husband",
-    ],
-):
-    rollouts = []
-    batch = [prompt] * batch_size
-
-    with t.no_grad(), model.generate(
-        batch,
-        max_new_tokens=length,
-        scan=False,
-        validate=False,
-        pad_token_id=model.tokenizer.eos_token_id,
-        do_sample=True,
-        top_p=0.8,
-        temperature=1,
-    ) as _:
-        baseline_output = model.generator.output.save()
-    baseline_decoded = model.tokenizer.batch_decode(
-        baseline_output, skip_special_tokens=True
-    )
-    baseline_p_success = (
-        sum(any(k in d for k in keywords) for d in baseline_decoded) / batch_size
-    )
-
-    with Progress() as progress:
-        task = progress.add_task("Generating rollouts...", total=len(coeffs))
-        for layer in [8]:
-            sv = SteeringVector.load(
-                Path("../data/gender/vectors/v1") / f"layer_8.pt", device="cuda"
-            )
-            # sv = SteeringVector.load(
-            #     Path("../data/gender/vectors/v8") / f"layer_8.pt", device="cuda"
-            # )
-            for coeff in coeffs:
-                with t.no_grad(), model.generate(
-                    batch,
-                    max_new_tokens=length,
-                    scan=False,
-                    validate=False,
-                    pad_token_id=model.tokenizer.eos_token_id,
-                    do_sample=True,
-                    top_p=0.8,
-                    temperature=1,
-                ) as _:
-                    model.transformer.h[layer].output[0][:] += coeff * sv.vector
-                    steered_output = model.generator.output.save()
-                decoded = model.tokenizer.batch_decode(
-                    steered_output, skip_special_tokens=True
-                )
-                rollouts.append(
-                    {
-                        "layer": layer,
-                        "p_success": sum(has_keyword(d, keywords) for d in decoded)
-                        / batch_size,
-                        "multiplier": coeff,
-                    }
-                )
-                progress.update(task, advance=1)
-    rollouts = pl.DataFrame(rollouts)
-    fig = px.line(
-        rollouts.to_pandas(),
-        x="multiplier",
-        y="p_success",
-        markers=True,
-    )
-    fig.add_hline(y=baseline_p_success, line_dash="dot", line_color="red")
-    return rollouts, fig
-
-
-rollouts, fig = p_successful_rollout(model, "I went up to my fried", batch_size=200)
-fig.show()
+    "My favorite doll is a little",
+    vector,
+    GENDER_KEYWORDS,
+    multipliers=[3],
+)
 
 # %%
+
+results = []
+for layer in range(12):
+    vector = SteeringVector.load(
+        Path("../data/gender/vectors/v1") / f"layer_{layer}.pt", device=device
+    )
+    p_success = scoring.p_successful_rollout(
+        model,
+        "My favorite doll is a little",
+        vector,
+        GENDER_KEYWORDS,
+        multipliers=[3],
+    )
+    results += [
+        {"layer": layer, "p_success": p_success[3], "type": "steered"},
+        {"layer": layer, "p_success": p_success[0], "type": "unsteered"},
+    ]
+
+# %%
+
+df = pl.DataFrame(results)
+
+fig = px.line(
+    df.filter(c("type") == "steered"),
+    x="layer",
+    y="p_success",
+    color="type",
+    title="Probability of Masculine Keywords in Completion",
+    labels={
+        "layer": "Layer with Applied Steering Vector",
+        "p_success": "P(masculine keyword present)",
+        "type": "Model",
+    },
+    color_discrete_map={"steered": "steelblue", "unsteered": "silver"},
+)
+
+fig.update_layout(showlegend=False)
+
+fig.add_hline(
+    y=df.filter(c("type") == "unsteered").get_column("p_success").mean(),
+    line_dash="dash",
+    annotation_text="Unsteered baseline",
+)
+
+fig.show()
